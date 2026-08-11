@@ -64,6 +64,18 @@ never leaks a private conversation. The excluded apps are configurable as `audio
 in `config.json` (default: Discord, DiscordCanary, DiscordPTB, Vesktop); an empty list
 records the full system mix.
 
+## Old PCs are the scope, not an afterthought
+
+DejaVu is built to run on roughly 2015-era machines: one tray exe, ~25 MB of RAM, and
+near-zero CPU when a hardware H.264 encoder exists (NVENC since 2012, QuickSync since
+2011, AMD VCE since 2013 — without one, encoding falls back to software and costs CPU).
+Disk use is bounded by the buffer window — roughly 300 MB–1 GB depending on length and
+quality — and writes stay light on both SSDs and hard drives. The floor is Windows 10
+2004; that same build provides the process-loopback audio device, so Discord exclusion
+works everywhere the app runs. This scope is also why the buffer lives on disk rather
+than RAM: on an older 8 GB machine, a half-gigabyte of RAM is far more precious than a
+half-gigabyte of disk — and the disk ring is what makes crash recovery possible at all.
+
 ## Privacy
 
 The buffer lives in `%LOCALAPPDATA%\DejaVu\buffer` and is wiped after a clean exit
