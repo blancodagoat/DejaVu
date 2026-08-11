@@ -99,6 +99,23 @@ if (args.Length > 1 && args[0] == "inspect")
     return 0;
 }
 
+// Mux one vid/aud pair and probe the result. Usage: -- mux <video> <audio> <output>
+if (args.Length == 4 && args[0] == "mux")
+{
+    try
+    {
+        Mp4Concat.MuxParallel(args[1], args[2], args[3]);
+        var (muxFrames, muxLuma) = Mf.ProbeVideo(args[3]);
+        Console.WriteLine($"mux ok: {new FileInfo(args[3]).Length / 1024} KB, decoded {muxFrames} frames, luma {muxLuma:F1}");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"mux FAILED: {ex.Message}");
+    }
+
+    return 0;
+}
+
 // Engine smoke: the new WGC + Media Foundation pipeline. Captures the primary monitor,
 // rotates the writer mid-capture (the gapless seam), then remuxes both segments through
 // the concat path — which also proves the chosen codec survives the save pipeline.

@@ -573,13 +573,23 @@ internal sealed class ReplayBuffer : IDisposable
             if (File.Exists(audioPath))
             {
                 Mp4Concat.MuxParallel(videoPath, audioPath, segmentPath);
-                TryDelete(videoPath);
+                // The parts are only discarded once the joined file provably decodes;
+                // a bad mux degrades to the intact silent video instead.
+                if (Mf.ProbeVideo(segmentPath, maxSamples: 1).Frames > 0)
+                {
+                    TryDelete(videoPath);
+                    TryDelete(audioPath);
+                    return;
+                }
+
+                AppLog.Write($"muxed segment did not decode; keeping silent video ({Path.GetFileName(segmentPath)})");
+                TryDelete(segmentPath);
                 TryDelete(audioPath);
-                return;
             }
         }
-        catch
+        catch (Exception ex)
         {
+            AppLog.Write($"segment mux failed: {ex.Message} ({Path.GetFileName(segmentPath)})");
             TryDelete(segmentPath);
             TryDelete(audioPath);
         }

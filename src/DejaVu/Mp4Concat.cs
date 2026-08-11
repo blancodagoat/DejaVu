@@ -45,9 +45,41 @@ internal static class Mp4Concat
         }
     }
 
+    /// <summary>
+    /// A sink writer for file-to-file remuxing. Throttling MUST be disabled: it paces
+    /// WriteSample for live pipelines, and on 60-second inputs it blocks the call for
+    /// minutes — killed mid-crawl, the output is a full-size file with no index that
+    /// nothing can play. Caught live in a memory dump.
+    /// </summary>
+    private static Mf.IMFSinkWriter CreateFileWriter(string output)
+    {
+        Mf.Check(Mf.MFCreateAttributes(out var attrs, 1));
+        Mf.IMFSinkWriter writer;
+        try
+        {
+            var key = Mf.SINK_WRITER_DISABLE_THROTTLING;
+            Mf.Check(attrs.SetUINT32(ref key, 1));
+            var attrsPtr = System.Runtime.InteropServices.Marshal.GetIUnknownForObject(attrs);
+            try
+            {
+                Mf.Check(Mf.MFCreateSinkWriterFromURL(output, IntPtr.Zero, attrsPtr, out writer));
+            }
+            finally
+            {
+                Marshal.Release(attrsPtr);
+            }
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(attrs);
+        }
+
+        return writer;
+    }
+
     private static void WriteAll(List<Mf.IMFSourceReader> readers, string output)
     {
-        Mf.Check(Mf.MFCreateSinkWriterFromURL(output, IntPtr.Zero, IntPtr.Zero, out var writer));
+        var writer = CreateFileWriter(output);
         try
         {
             // Writer streams are declared from the first input's native types; later inputs
@@ -168,7 +200,7 @@ internal static class Mp4Concat
             Mf.Check(Mf.MFCreateSourceReaderFromURL(audioPath, IntPtr.Zero, out var audio));
             try
             {
-                Mf.Check(Mf.MFCreateSinkWriterFromURL(output, IntPtr.Zero, IntPtr.Zero, out var writer));
+                var writer = CreateFileWriter(output);
                 try
                 {
                     int videoOut = AddFirstStream(writer, video, Mf.SOURCE_READER_FIRST_VIDEO_STREAM);
