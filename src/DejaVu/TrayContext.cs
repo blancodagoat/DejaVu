@@ -57,10 +57,16 @@ internal sealed class TrayContext : ApplicationContext
         }
 
         // A replay tool that is not running records nothing, so starting with Windows is
-        // the default. The tray toggle still turns it off for good.
+        // the default. The tray toggle still turns it off for good. Later launches
+        // re-point the entry at wherever the exe lives now, so a moved or re-downloaded
+        // exe does not silently break autostart.
         if (config.FirstRun)
         {
             StartupRegistry.TrySet(true);
+        }
+        else
+        {
+            StartupRegistry.Repair();
         }
 
         // Recovery first, off the UI thread — stitching a crashed session's segments can
