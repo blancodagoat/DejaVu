@@ -25,6 +25,7 @@
     <Compile Include="..\..\src\DejaVu\AppConfig.cs" />
     <Compile Include="..\..\src\DejaVu\ReplayBuffer.cs" />
     <Compile Include="..\..\src\DejaVu\SourceApp.cs" />
+    <Compile Include="..\..\src\DejaVu\AppLog.cs" />
     <Compile Include="..\..\src\DejaVu\MfInterop.cs" />
     <Compile Include="..\..\src\DejaVu\AudioLoopback.cs" />
     <Compile Include="..\..\src\DejaVu\CaptureEngine.cs" />
