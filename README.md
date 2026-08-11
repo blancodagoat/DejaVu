@@ -1,121 +1,146 @@
 <div align="center">
 
-# DejaVu
+# 🔴 DejaVu
 
-**Instant replay for Windows that stays out of your way.**
+### Your last 5–25 minutes, always recorded. One key saves it.
 
-Tray-only · rolling buffer · hardware encoding · crash-safe · no uploads · no editor · no telemetry
+**Like ShadowPlay — but it never turns itself off, survives crashes,<br>and keeps Discord out of your clips.**
+
+`one exe` · `any GPU` · `no account` · `no uploads` · `no telemetry`
 
 </div>
 
 ---
 
-DejaVu quietly keeps the last few minutes of your screen in a rolling buffer.
-Press **Alt+F10** and that moment is saved as an MP4 — like ShadowPlay, without the
-driver suite, and built around the ways replay tools usually let people down:
+## ⚡ The whole app in 10 seconds
 
-- **It is always on.** Buffering starts the instant the app launches, the app starts
-  with Windows by default, and the corner dot tells you the buffer is rolling. If a
-  capture source dies, DejaVu falls back to the main display and keeps going — it
-  never switches itself off silently.
-- **A crash loses nothing.** The buffer is written as crash-safe fragmented MP4 in
-  fixed segments on disk. If the PC hard-resets or the app is killed, the next launch
-  stitches what survived into a clip automatically.
-- **Clips are named for the game.** The app in the foreground when you hit the hotkey
-  becomes the filename: `eldenring_2026-08-11_224513.mp4`.
+1. 🔴 **A red dot in the corner** = your screen is being buffered. Always. Starts with Windows.
+2. 🎮 **Something clip-worthy happens.**
+3. ⌨️ **Press <kbd>Alt</kbd>+<kbd>F10</kbd>** → `eldenring_2026-08-11_224513.mp4` lands in `Videos\DejaVu`. A balloon confirms. Done.
 
-## Quick start
+That's it. There is no window, no scenes, no setup. The tray menu has every setting.
 
-1. Build and run `DejaVu.exe`. An icon appears in the tray; a small red dot in the
-   bottom-right corner shows the buffer is rolling.
-2. Something worth keeping happens.
-3. Press **Alt+F10**. The replay lands in `Videos\DejaVu`.
+---
 
-## How it works
+## 🧠 Why it doesn't let you down
 
-The capture target is recorded in one-minute hardware-encoded H.264 segments
-(NVENC/AMF/QuickSync, picked automatically — near-zero CPU). Segments older than the
-buffer window are deleted as they age out, so disk use stays flat. Saving stitches
-segments together without re-encoding: fast, lossless, standard MP4 out.
-
-Encoding uses constant-quality rate control rather than a fixed bitrate — action gets
-the bits, menus and static screens cost almost nothing.
-
-Everything is configured from the tray menu:
-
-| | |
+| 😤 The usual pain | ✅ DejaVu |
 |---|---|
-| **Capture** | Auto (follows the active window's display), a pinned monitor, or one specific window |
-| **Buffer length** | 5 / 10 / 15 / 20 / 25 minutes |
-| **Quality** | Low / Medium / High (constant quality, size varies with content) |
-| **Frame rate** | 30 / 60 / 90 / 120 / 144 / 165 / 240 fps — offered up to what your displays can show |
-| **Clip folder cap** | Off / 10 / 25 / 50 GB — oldest clips roll off; the newest is never touched |
-| **System audio** | recorded into the replay — with Discord's notifications and voice chat kept out of the mix (see below). The mic is never captured |
-| **Corner indicator** | the dot; excluded from recordings, click-through |
+| ShadowPlay **turns itself off silently** — you press the key, nothing was recording | Always on. If capture breaks, it heals itself and **tells you**. Never silent. |
+| OBS makes you **remember to start the buffer** | Buffering from the second it launches. Boot → buffering. |
+| **A crash eats your clip** (RAM buffers lose everything) | Buffer lives on disk as crash-safe segments. PC died? **Next boot auto-saves what survived.** |
+| Discord pings & voice chat **leak into shared clips** | Discord's audio is **excluded from the mix by default**. Zero setup. |
+| `Replay_2024_final(3).mp4` filename chaos | Clips auto-named after the game that was on screen. |
+| Saved clips **eat your disk forever** | Optional cap: oldest clips roll off past 10/25/50 GB. Newest is never touched. |
 
-The save hotkey is rebindable from the tray ("Change save hotkey…").
-Window picks last for the session; displays and auto persist.
+---
 
-## Discord stays out of your clips
+## 🎛️ Everything you can change (it's all in the tray menu)
 
-Replay audio is captured through Windows' process-loopback device with the Discord
-process tree excluded — voice chat, notification pings, all of it — so a shared clip
-never leaks a private conversation. The excluded apps are configurable as `audioExclude`
-in `config.json` (default: Discord, DiscordCanary, DiscordPTB, Vesktop); an empty list
-records the full system mix.
+| Setting | Options |
+|---|---|
+| ⏱️ Buffer length | 5 / 10 / 15 / 20 / 25 min |
+| 🖥️ Capture | Auto (follows your game) · any monitor · one window |
+| 🎚️ Quality | Low / Medium / High — smart encoding: action gets the bits, menus cost ~nothing |
+| 🎞️ Frame rate | 30 → 240 fps, only what your display can actually show |
+| 🔊 System audio | On/off — mic is **never** recorded |
+| 💾 Clip folder cap | Off / 10 / 25 / 50 GB |
+| ⌨️ Hotkey | Click-to-rebind dialog |
+| 🔴 Corner dot | On/off — it's click-through and **never appears in your clips** |
 
-## Why not ShadowPlay or OBS?
+> 🛡️ **Admin games?** If hotkeys die while a game with anti-cheat has focus, hit *Restart as administrator* in the tray once. That's a Windows rule, not ours.
 
-Both are good at what DejaVu doesn't do. For the one job of an instant-replay buffer,
-each fails in a way users report constantly:
+---
 
-| | ShadowPlay / NVIDIA App | OBS replay buffer | DejaVu |
+## 🥊 vs the big two
+
+| | ShadowPlay | OBS Replay Buffer | 🔴 DejaVu |
 |---|---|---|---|
-| Stays on | Turns itself off silently — per-game, after driver updates, on alt-tab | You must remember to start the buffer every session | Always on from launch and boot; self-heals; the dot says so |
-| Crash | RAM buffer — a crash loses everything | MP4 output corrupts on crash unless you remux MKV | Disk segments survive; next launch saves them automatically |
-| Feedback | Save sometimes silently does nothing | No native "replay saved" toast at all | Balloon on every save; click it to reveal the file |
-| Filenames | Per-game folders | Manual strftime setup or clips overwrite | `eldenring_2026-08-11_224513.mp4`, automatic |
-| Voice privacy | Discord audio lands in the mix | Only with per-app audio sources configured by hand | Discord excluded by default, zero setup |
-| Needs | The NVIDIA App + overlay stack, NVIDIA GPU only | The whole OBS install and a scene collection | One exe, any GPU with a hardware encoder |
-| Buffer lives in | RAM | RAM (capped at 75% of physical) | Bounded disk ring — nothing held in RAM |
+| Stays on | ❌ silently dies | ❌ manual start | ✅ always + self-heals |
+| Crash survival | ❌ RAM, all lost | ⚠️ MKV remux dance | ✅ auto-recovers on boot |
+| "Saved!" feedback | ⚠️ sometimes nothing | ❌ none natively | ✅ balloon, click to open |
+| Discord-free audio | ❌ | ⚠️ manual per-app setup | ✅ default |
+| Install | NVIDIA App + overlay | full OBS + scenes | one exe (~160 KB) |
+| GPU | NVIDIA only | any | any with a hw encoder |
 
-The claims about ShadowPlay and OBS reflect their designs and widely-reported user
-complaints; both projects evolve, so verify against current versions.
+<sub>Based on each tool's design and widely-reported user complaints; both evolve, verify against current versions.</sub>
 
-While buffering, DejaVu's measured working set is ~120 MB at 1440p/30 fps Low and
-~190 MB at 1440p/60 fps High — the encoder pipeline is the cost, and shrinking it is an
-active work item. The app itself is a ~160 KB framework-dependent exe with no services,
-no overlay, and no account.
+**Honest numbers:** while buffering 1440p, DejaVu's working set measures ~120 MB (Low/30) to ~190 MB (High/60) — the encoder pipeline is the cost, and shrinking it is an active work item. Idle-paused it's a tray icon. No overlay, no services, no FPS tax from an in-game UI.
 
-## Old PCs are the scope, not an afterthought
+---
 
-DejaVu is built to run on roughly 2015-era machines: one tray exe, ~25 MB of RAM, and
-near-zero CPU when a hardware H.264 encoder exists (NVENC since 2012, QuickSync since
-2011, AMD VCE since 2013 — without one, encoding falls back to software and costs CPU).
-Disk use is bounded by the buffer window — roughly 300 MB–1 GB depending on length and
-quality — and writes stay light on both SSDs and hard drives. The floor is Windows 10
-2004; that same build provides the process-loopback audio device, so Discord exclusion
-works everywhere the app runs. This scope is also why the buffer lives on disk rather
-than RAM: on an older 8 GB machine, a half-gigabyte of RAM is far more precious than a
-half-gigabyte of disk — and the disk ring is what makes crash recovery possible at all.
+<details>
+<summary>🔧 <b>How it works under the hood</b> (click)</summary>
 
-## Privacy
+<br>
 
-The buffer lives in `%LOCALAPPDATA%\DejaVu\buffer` and is wiped after a clean exit
-(after a crash it becomes the recovered clip). Nothing leaves your machine. Pause
-buffering from the tray menu any time; the dot turns grey.
+- 📼 **Segment ring** — your screen is recorded in 1-minute hardware-encoded H.264 segments (NVENC / AMF / QuickSync, near-zero CPU) as **fragmented MP4**: kill the power mid-write and the file still plays. Old segments delete themselves, so disk use stays flat (~300 MB–1 GB total, by settings).
+- 💾 **Save** = stitch the segments covering your window into one standard MP4 — a lossless remux, no re-encode, done in about a second.
+- 💥 **Crash recovery** — segments on disk at launch mean the last session died; they're auto-stitched into `recovered_*.mp4` and you get a balloon.
+- 🩹 **Self-healing capture** — a source that delivers zero frames gets dropped for the main display; a sleeping/locked screen just idles until you're back. It only ever stops after repeated hard failures, and it *says so*.
+- 🔇 **Discord exclusion** — audio comes from Windows' process-loopback device with Discord's process tree removed from the mix (voice, pings, everything), encoded to AAC live and muxed per segment. Configurable: `audioExclude` in config (default Discord / Canary / PTB / Vesktop).
 
-## Building
+</details>
+
+<details>
+<summary>🖥️ <b>Runs on old PCs — that's the point</b></summary>
+
+<br>
+
+Built for ~2015 machines and up:
+
+- **Windows 10 2004+** (that same build provides the Discord-exclusion audio device, so it works everywhere the app runs)
+- **Any GPU with a hardware H.264 encoder** — NVENC since 2012, QuickSync since 2011, AMD VCE since 2013. No hw encoder → software fallback (costs CPU).
+- **Disk over RAM by design**: on an old 8 GB machine, RAM is what your game needs — the buffer takes none of it. Disk writes are light enough for a 2015 hard drive.
+
+</details>
+
+<details>
+<summary>🔒 <b>Privacy</b></summary>
+
+<br>
+
+- The buffer lives in `%LOCALAPPDATA%\DejaVu\buffer`, wiped on clean exit (after a crash it becomes your recovered clip).
+- Nothing ever leaves your machine. No uploads, no account, no telemetry, no update phone-home.
+- Pause buffering any time from the tray — the dot turns grey.
+- The mic is **never** captured. Discord voices are **never** in the mix by default.
+
+</details>
+
+<details>
+<summary>📁 <b>Files & config</b></summary>
+
+<br>
+
+| Where | What |
+|---|---|
+| `Videos\DejaVu` | your saved replays |
+| `%APPDATA%\DejaVu\config.json` | all settings (broken values self-repair to defaults) |
+| `%LOCALAPPDATA%\DejaVu\buffer` | the rolling buffer |
+
+Config keys: `bufferMinutes` (5–25) · `quality` · `fps` · `saveHotkey` · `saveRoot` · `captureTarget` (`"auto"` or `\\.\DISPLAY2`) · `showIndicator` · `systemAudio` · `clipCapGB` · `audioExclude`
+
+</details>
+
+<details>
+<summary>🛠️ <b>Building & tests</b></summary>
+
+<br>
 
 ```
 dotnet build src/DejaVu/DejaVu.csproj
 dotnet run --project tests/DejaVu.Tests            # unit tests
-dotnet run --project tests/DejaVu.Tests -- smoke   # + live capture/crash-recovery/concat check
+dotnet run --project tests/DejaVu.Tests -- smoke   # + live capture / crash-recovery / audio-exclusion proof
 ```
 
-The smoke test needs an active desktop (it records the real screen) and skips itself
-if the screen is locked or asleep.
+The smoke test records the real screen and plays a test tone to *prove* exclusion strips it from the captured mix. It skips itself if the screen is locked or asleep.
 
-## License
+</details>
 
-[MIT](LICENSE)
+---
+
+<div align="center">
+
+**[MIT license](LICENSE)** · sibling of 🖼️ [Memento](https://github.com/blancodagoat/memento), the screenshot tool that stays out of your way
+
+</div>
