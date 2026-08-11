@@ -23,6 +23,16 @@
     <ApplicationIcon>..\..\assets\app.ico</ApplicationIcon>
   </PropertyGroup>
 
+  <!-- Single-file compression stays off for the same reason as Memento: compressed
+       assemblies inflate into private, unshareable pages at startup, and resident
+       memory is the cost that matters for an app that runs all day. -->
+  <PropertyGroup>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
   <ItemGroup>
     <EmbeddedResource Include="..\..\assets\app.ico" LogicalName="DejaVu.app.ico" />
     <EmbeddedResource Include="..\..\assets\tray-light.ico" LogicalName="DejaVu.tray-light.ico" />

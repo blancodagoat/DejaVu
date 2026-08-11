@@ -1,0 +1,39 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Test
+        run: dotnet run --project tests/DejaVu.Tests
+
+      - name: Publish (framework-dependent)
+        run: dotnet publish src/DejaVu/DejaVu.csproj -c Release -p:SelfContained=false -o publish/framework-dependent
+
+      - name: Publish (self-contained)
+        run: dotnet publish src/DejaVu/DejaVu.csproj -c Release -o publish/self-contained
+
+      - name: Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
+        run: |
+          Copy-Item publish/self-contained/DejaVu.exe DejaVu-self-contained.exe
+          gh release delete $env:TAG --yes --cleanup-tag
+          if ($LASTEXITCODE -ne 0) { "no previous release to replace" }
+          gh release create $env:TAG publish/framework-dependent/DejaVu.exe DejaVu-self-contained.exe --target $env:GITHUB_SHA --generate-notes
