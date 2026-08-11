@@ -33,6 +33,8 @@ internal sealed class ReplayBuffer : IDisposable
     private IntPtr windowTarget;
     private bool sourceFallback;
     private int consecutiveFailures;
+    private int giveUpStreak;
+    private bool manuallyPaused;
     private bool audioWarned;
 
 
@@ -172,6 +174,7 @@ internal sealed class ReplayBuffer : IDisposable
             }
 
             running = true;
+            manuallyPaused = false;
             consecutiveFailures = 0;
             audioWarned = false;
 
@@ -183,9 +186,13 @@ internal sealed class ReplayBuffer : IDisposable
             catch (Exception ex)
             {
                 running = false;
+                AppLog.Write("capture could not start: " + ex.Message);
                 Failed?.Invoke("Capture could not start: " + ex.Message);
                 return;
             }
+
+            AppLog.Write($"buffering started: codec {(engine.Codec == Mf.VideoFormat_AV1 ? "AV1" : "H264")}, "
+                + $"target {(window != IntPtr.Zero ? "window" : "monitor")}, {config.Fps} fps, quality {config.QualityValue}");
 
             engineMonitor = monitor;
             engineWindow = window;
@@ -196,6 +203,17 @@ internal sealed class ReplayBuffer : IDisposable
             StartAudio();
             cycleTimer.Change(TimeSpan.FromSeconds(segmentSeconds), TimeSpan.FromSeconds(segmentSeconds));
         }
+    }
+
+    /// <summary>The user's pause: suppresses the automatic cool-down retry too.</summary>
+    public void Pause()
+    {
+        lock (gate)
+        {
+            manuallyPaused = true;
+        }
+
+        Stop();
     }
 
     public void Stop()
@@ -266,21 +284,63 @@ internal sealed class ReplayBuffer : IDisposable
         if (currentAudio is null && !audioWarned)
         {
             audioWarned = true;
+            AppLog.Write("audio capture failed to start");
             Failed?.Invoke("Audio capture failed; replays will be silent.");
         }
     }
 
     private void OnEngineError(string message)
     {
+        AppLog.Write("engine error: " + message);
+        bool giveUp;
         lock (gate)
         {
-            EscalateFallback(message);
+            consecutiveFailures++;
+            giveUp = consecutiveFailures >= 3;
+            if (!sourceFallback && !giveUp)
+            {
+                sourceFallback = true;
+                Failed?.Invoke(message);
+            }
         }
 
-        if (Running)
+        if (!Running)
+        {
+            return;
+        }
+
+        if (!giveUp)
         {
             Task.Run(Restart);
+            return;
         }
+
+        // Repeated failures: tear down COMPLETELY (finalize the in-flight segment, stop
+        // the audio capture, release the engine — a half-stopped buffer leaks a recorder
+        // that runs forever), report once per streak, and retry on a cool-down instead
+        // of dying for good. "It silently stopped recording" must never be this app.
+        Task.Run(() =>
+        {
+            Stop();
+            bool firstGiveUp;
+            lock (gate)
+            {
+                firstGiveUp = ++giveUpStreak == 1;
+                consecutiveFailures = 0;
+            }
+
+            AppLog.Write($"buffering paused after repeated failures (streak {giveUpStreak}); retrying in 60 s");
+            if (firstGiveUp)
+            {
+                Failed?.Invoke("Recording keeps failing; retrying every minute. " + message);
+            }
+
+            Thread.Sleep(TimeSpan.FromSeconds(60));
+            if (!Running && !manuallyPaused)
+            {
+                Start();
+            }
+        });
     }
 
     /// <summary>Applies changed settings by starting a fresh segment chain. A paused
@@ -477,6 +537,7 @@ internal sealed class ReplayBuffer : IDisposable
             lock (gate)
             {
                 consecutiveFailures = 0;
+                giveUpStreak = 0;
             }
         }
         else
@@ -491,6 +552,7 @@ internal sealed class ReplayBuffer : IDisposable
                 if (!sourceFallback)
                 {
                     sourceFallback = true;
+                    AppLog.Write("segment had zero frames; falling back to the main display");
                     Failed?.Invoke("Capture produced no frames; watching the main display until it recovers.");
                 }
             }
@@ -598,27 +660,6 @@ internal sealed class ReplayBuffer : IDisposable
 
         var monitor = string.IsNullOrEmpty(device) ? IntPtr.Zero : Native.MonitorFromDeviceName(device);
         return (monitor != IntPtr.Zero ? monitor : Native.PrimaryMonitor(), IntPtr.Zero);
-    }
-
-    /// <summary>
-    /// Caller must hold <see cref="gate"/>. Hard recorder errors: first strike swaps
-    /// future segments onto the main display; repeated strikes on the fallback stop the
-    /// buffer — loudly, via <see cref="Failed"/>, never silently.
-    /// </summary>
-    private void EscalateFallback(string reason)
-    {
-        consecutiveFailures++;
-        if (!sourceFallback)
-        {
-            sourceFallback = true;
-            Failed?.Invoke(reason);
-        }
-        else if (consecutiveFailures >= 3)
-        {
-            running = false;
-            cycleTimer.Change(Timeout.Infinite, Timeout.Infinite);
-            Failed?.Invoke("Recording keeps failing; buffering stopped. " + reason);
-        }
     }
 
     /// <summary>Deletes segments that have aged out of the largest possible window.</summary>

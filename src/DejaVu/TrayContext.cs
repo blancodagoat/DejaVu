@@ -353,6 +353,7 @@ internal sealed class TrayContext : ApplicationContext
             try
             {
                 var path = buffer.Save(appName);
+                AppLog.Write($"saved {Path.GetFileName(path)} ({new FileInfo(path).Length / 1024 / 1024} MB)");
                 OnUi(() =>
                 {
                     lastSaved = path;
@@ -361,6 +362,7 @@ internal sealed class TrayContext : ApplicationContext
             }
             catch (Exception ex)
             {
+                AppLog.Write("save failed: " + ex.Message);
                 OnUi(() => Balloon("Save failed", ex.Message, ToolTipIcon.Error));
             }
             finally
@@ -374,7 +376,7 @@ internal sealed class TrayContext : ApplicationContext
     {
         if (buffer.Running)
         {
-            buffer.Stop();
+            buffer.Pause();
         }
         else
         {
