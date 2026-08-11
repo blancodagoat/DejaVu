@@ -149,6 +149,34 @@ internal sealed class TrayContext : ApplicationContext
             }
         }));
 
+        var updates = new ToolStripMenuItem("Check for updates");
+        updates.Click += async (_, _) =>
+        {
+            updates.Enabled = false;
+            try
+            {
+                var newer = await UpdateCheck.FindNewer(UpdateCheck.Current);
+                if (newer is { } found)
+                {
+                    Balloon("Update available", $"DejaVu v{found.Version} is out; opening the release page.", ToolTipIcon.Info);
+                    Process.Start(new ProcessStartInfo(found.Url) { UseShellExecute = true });
+                }
+                else
+                {
+                    Balloon("Up to date", $"You're on the newest release (v{UpdateCheck.Current}).", ToolTipIcon.None);
+                }
+            }
+            catch
+            {
+                Balloon("Update check failed", "Couldn't reach GitHub. Try again later.", ToolTipIcon.Warning);
+            }
+            finally
+            {
+                updates.Enabled = true;
+            }
+        };
+        menu.Items.Add(updates);
+
         var startup = new ToolStripMenuItem("Start with Windows");
         startup.Click += (_, _) => { StartupRegistry.TrySet(!StartupRegistry.IsEnabled()); };
         menu.Opening += (_, _) => startup.Checked = StartupRegistry.IsEnabled();

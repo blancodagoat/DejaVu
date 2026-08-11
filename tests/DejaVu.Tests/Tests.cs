@@ -80,6 +80,26 @@ Eq("cap off-by-nothing at exact fit",
 Eq("oversized single clip survives alone",
     ReplayBuffer.SelectClipsOverCap([("only", 3 * gb, now)], gb).Count, 0);
 
+// Update check: pure parsing over canned GitHub releases JSON. The rolling "latest"
+// tag and prereleases must be ignored; only a newer stable vX.Y.Z counts.
+{
+    const string releases = """
+    [
+      {"tag_name":"latest","prerelease":false,"html_url":"https://example/rolling"},
+      {"tag_name":"v2.0.0","prerelease":true,"html_url":"https://example/pre"},
+      {"tag_name":"v1.2.0","prerelease":false,"html_url":"https://example/v120"},
+      {"tag_name":"v1.0.0","prerelease":false,"html_url":"https://example/v100"}
+    ]
+    """;
+    var newer = UpdateCheck.ParseNewest(releases, new Version(1, 0, 0));
+    Check("update check finds newest stable", newer is { } n && n.Version == new Version(1, 2, 0) && n.Url == "https://example/v120",
+        newer?.Version.ToString());
+    Check("update check ignores rolling and prerelease",
+        UpdateCheck.ParseNewest(releases, new Version(1, 2, 0)) is null);
+    Check("four-part local version compares as equal",
+        UpdateCheck.ParseNewest("""[{"tag_name":"v1.0.0","prerelease":false,"html_url":"x"}]""", new Version(1, 0, 0, 0)) is null);
+}
+
 // Inspect: decode-probe arbitrary files. Usage: -- inspect <file> [<file>...]
 if (args.Length > 1 && args[0] == "inspect")
 {

@@ -30,6 +30,7 @@
     <Compile Include="..\..\src\DejaVu\AudioLoopback.cs" />
     <Compile Include="..\..\src\DejaVu\CaptureEngine.cs" />
     <Compile Include="..\..\src\DejaVu\Mp4Concat.cs" />
+    <Compile Include="..\..\src\DejaVu\UpdateCheck.cs" />
   </ItemGroup>
 
   <ItemGroup>

@@ -105,7 +105,7 @@ DejaVu is built for roughly 2015 machines and up:
 <br>
 
 - The buffer lives in `%LOCALAPPDATA%\DejaVu\buffer` and is wiped on a clean exit. After a crash it becomes your recovered clip instead.
-- Nothing leaves your machine. No uploads, no account, no telemetry, no update phone-home.
+- Nothing leaves your machine. No uploads, no account, no telemetry. The app never phones home; the update check in the tray menu runs only when you click it.
 - Pause buffering any time from the tray; the dot turns grey.
 - The mic is never captured, and Discord voices are kept out of the mix by default.
 
