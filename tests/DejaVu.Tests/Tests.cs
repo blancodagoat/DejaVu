@@ -80,6 +80,57 @@ Eq("cap off-by-nothing at exact fit",
 Eq("oversized single clip survives alone",
     ReplayBuffer.SelectClipsOverCap([("only", 3 * gb, now)], gb).Count, 0);
 
+// Engine smoke: the new WGC + Media Foundation pipeline. Captures the primary monitor,
+// rotates the writer mid-capture (the gapless seam), then remuxes both segments through
+// the concat path — which also proves the chosen codec survives the save pipeline.
+if (args.Length > 0 && args[0] == "engine")
+{
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern IntPtr MonitorFromPoint(System.Drawing.Point pt, uint flags);
+
+    var monitor = MonitorFromPoint(default, 1 /* PRIMARY */);
+    string p1 = Path.Combine(Path.GetTempPath(), "dejavu_eng1.mp4");
+    string p2 = Path.Combine(Path.GetTempPath(), "dejavu_eng2.mp4");
+    string merged = Path.Combine(Path.GetTempPath(), "dejavu_eng_merged.mp4");
+
+    string? engineError = null;
+    int rotatedFrames = 0;
+    using (var engine = new CaptureEngine(monitor, IntPtr.Zero, 60, 70))
+    {
+        engine.Error += e => engineError = e;
+        Console.WriteLine($"engine codec: {(engine.Codec == Mf.VideoFormat_AV1 ? "AV1" : "H264")} (AV1 hw: {CaptureEngine.Av1Available})");
+
+        engine.Start(p1);
+        Thread.Sleep(3000);
+        int liveFrames = engine.FramesInSegment;
+        using var rotated = new ManualResetEventSlim(false);
+        engine.Rotate(p2, frames => { rotatedFrames = frames; rotated.Set(); });
+        Thread.Sleep(3000);
+        engine.Stop();
+        rotated.Wait(5000);
+
+        Check("engine reported no errors", engineError is null, engineError);
+        Check("frames flowed before rotate", liveFrames > 30, $"got {liveFrames}");
+        Check("rotate finalized with frames", rotatedFrames > 30, $"got {rotatedFrames}");
+    }
+
+    // Size floors are deliberately low: AV1 on a static desktop is startlingly small
+    // (a keyframe plus near-empty deltas), and that efficiency is the point.
+    Check("segment 1 exists", new FileInfo(p1).Length > 8_000, $"{new FileInfo(p1).Length} bytes");
+    Check("segment 2 exists", new FileInfo(p2).Length > 8_000, $"{new FileInfo(p2).Length} bytes");
+
+    try
+    {
+        Mp4Concat.Concat([p1, p2], merged);
+        Check("engine segments remux through save path", new FileInfo(merged).Length > 12_000);
+        Console.WriteLine($"engine merged: {merged} ({new FileInfo(merged).Length / 1024} KB)");
+    }
+    catch (Exception ex)
+    {
+        Check("engine segments remux through save path", false, ex.Message);
+    }
+}
+
 // Live audio: prove process-tree exclusion works, using ourselves as the excluded app.
 // A tone plays from this process; captured system audio with our tree excluded must be
 // silent while an unexcluded capture hears it. Needs an unmuted default output device.

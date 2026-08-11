@@ -31,6 +31,145 @@ internal static class Mf
     public static readonly Guid MT_AUDIO_AVG_BYTES_PER_SECOND = new("1aab75c8-cfef-451c-ab95-ac034b8e1731");
     public static readonly Guid MT_AUDIO_BLOCK_ALIGNMENT = new("322de230-9eeb-43bd-ab7a-ff412251541d");
 
+    // Video encode path — all values read out of the Windows SDK headers.
+    public static readonly Guid VideoFormat_H264 = new("34363248-0000-0010-8000-00AA00389B71");
+    public static readonly Guid VideoFormat_AV1 = new("31305641-0000-0010-8000-00AA00389B71");
+    public static readonly Guid VideoFormat_ARGB32 = new("00000015-0000-0010-8000-00AA00389B71");
+    public static readonly Guid VideoFormat_RGB32 = new("00000016-0000-0010-8000-00AA00389B71");
+    public static readonly Guid MT_FRAME_SIZE = new("1652c33d-d6b2-4012-b834-72030849a37d");
+    public static readonly Guid MT_FRAME_RATE = new("c459a2e8-3d2c-4e44-b132-fee5156c7bb0");
+    public static readonly Guid MT_INTERLACE_MODE = new("e2724bb8-e676-4806-b4b2-a8d6efb44ccd");
+    public static readonly Guid MT_AVG_BITRATE = new("20332624-fb0d-4d9e-bd0d-cbf6786c102e");
+    public static readonly Guid MT_DEFAULT_STRIDE = new("644b4e48-1e02-4516-b0eb-c01ca9d49ac6");
+    public static readonly Guid READWRITE_ENABLE_HARDWARE_TRANSFORMS = new("a634a91c-822b-41b9-a494-4de4643612b0");
+    public static readonly Guid SINK_WRITER_D3D_MANAGER = new("ec822da2-e1e9-4b29-a0d8-563c719f5269");
+    public static readonly Guid SINK_WRITER_DISABLE_THROTTLING = new("08b845d8-2b74-4afe-9d53-be16d2d5ae4f");
+    public static readonly Guid TRANSCODE_CONTAINERTYPE = new("150ff23f-4abc-478b-ac4f-e1916fba1cca");
+    public static readonly Guid TranscodeContainerType_FMPEG4 = new("9ba876f1-419f-4b77-a1e0-35959d9d4004");
+
+    /// <summary>True when a hardware encoder MFT for the subtype is registered.</summary>
+    public static bool HasHardwareEncoder(Guid subtype)
+    {
+        var info = new MFT_REGISTER_TYPE_INFO { guidMajorType = MediaType_Video, guidSubtype = subtype };
+        var category = new Guid("f79eac7d-e545-4387-bdee-d647d7bde42a"); // MFT_CATEGORY_VIDEO_ENCODER
+        // HARDWARE | SYNCMFT | ASYNCMFT | SORTANDFILTER
+        if (MFTEnumEx(category, 0x47, IntPtr.Zero, ref info, out var activates, out int count) < 0)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            Marshal.Release(Marshal.ReadIntPtr(activates, i * IntPtr.Size));
+        }
+
+        if (activates != IntPtr.Zero)
+        {
+            Marshal.FreeCoTaskMem(activates);
+        }
+
+        return count > 0;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MFT_REGISTER_TYPE_INFO
+    {
+        public Guid guidMajorType;
+        public Guid guidSubtype;
+    }
+
+    [DllImport("mfplat.dll")]
+    private static extern int MFTEnumEx(
+        Guid category, uint flags, IntPtr inputType, ref MFT_REGISTER_TYPE_INFO outputType,
+        out IntPtr activates, out int count);
+
+    [DllImport("mfplat.dll")]
+    public static extern int MFCreateAttributes(out IMFAttributes attributes, uint initialSize);
+
+    [DllImport("mfplat.dll")]
+    public static extern int MFCreateDXGIDeviceManager(out uint resetToken, out IMFDXGIDeviceManager manager);
+
+    [DllImport("mfplat.dll")]
+    public static extern int MFCreateVideoSampleAllocatorEx(
+        ref Guid riid, [MarshalAs(UnmanagedType.IUnknown)] out object allocator);
+
+    [ComImport]
+    [Guid("2cd2d921-c447-44a7-a13c-4adabfc247e3")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IMFAttributes
+    {
+        [PreserveSig] int _GetItem();
+        [PreserveSig] int _GetItemType();
+        [PreserveSig] int _CompareItem();
+        [PreserveSig] int _Compare();
+        [PreserveSig] int _GetUINT32();
+        [PreserveSig] int _GetUINT64();
+        [PreserveSig] int _GetDouble();
+        [PreserveSig] int _GetGUID();
+        [PreserveSig] int _GetStringLength();
+        [PreserveSig] int _GetString();
+        [PreserveSig] int _GetAllocatedString();
+        [PreserveSig] int _GetBlobSize();
+        [PreserveSig] int _GetBlob();
+        [PreserveSig] int _GetAllocatedBlob();
+        [PreserveSig] int _GetUnknown();
+        [PreserveSig] int _SetItem();
+        [PreserveSig] int _DeleteItem();
+        [PreserveSig] int _DeleteAllItems();
+        [PreserveSig] int SetUINT32(ref Guid key, uint value);
+        [PreserveSig] int SetUINT64(ref Guid key, ulong value);
+        [PreserveSig] int _SetDouble();
+        [PreserveSig] int SetGUID(ref Guid key, ref Guid value);
+        [PreserveSig] int _SetString();
+        [PreserveSig] int _SetBlob();
+        [PreserveSig] int SetUnknown(ref Guid key, [MarshalAs(UnmanagedType.IUnknown)] object value);
+        [PreserveSig] int _LockStore();
+        [PreserveSig] int _UnlockStore();
+        [PreserveSig] int _GetCount();
+        [PreserveSig] int _GetItemByIndex();
+        [PreserveSig] int _CopyAllItems();
+    }
+
+    [ComImport]
+    [Guid("eb533d5d-2db6-40f8-97a9-494692014f07")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IMFDXGIDeviceManager
+    {
+        [PreserveSig] int CloseDeviceHandle(IntPtr handle);
+        [PreserveSig] int GetVideoService(IntPtr handle, ref Guid riid, out IntPtr service);
+        [PreserveSig] int LockDevice(IntPtr handle, ref Guid riid, out IntPtr device, bool block);
+        [PreserveSig] int OpenDeviceHandle(out IntPtr handle);
+        [PreserveSig] int ResetDevice(IntPtr device, uint resetToken);
+        [PreserveSig] int TestDevice(IntPtr handle);
+        [PreserveSig] int UnlockDevice(IntPtr handle, bool saveState);
+    }
+
+    [ComImport]
+    [Guid("545b3a48-3283-4f62-866f-a62d8f598f9f")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IMFVideoSampleAllocatorEx
+    {
+        // IMFVideoSampleAllocator
+        [PreserveSig] int SetDirectXManager([MarshalAs(UnmanagedType.IUnknown)] object manager);
+        [PreserveSig] int UninitializeSampleAllocator();
+        [PreserveSig] int InitializeSampleAllocator(uint requestedFrames, IMFMediaType type);
+        [PreserveSig] int AllocateSample(out IMFSample sample);
+        // IMFVideoSampleAllocatorEx
+        [PreserveSig] int InitializeSampleAllocatorEx(
+            uint initialSamples, uint maximumSamples, IMFAttributes? attributes, IMFMediaType type);
+    }
+
+    [ComImport]
+    [Guid("e7174cfa-1c9e-48b1-8866-626226bfc258")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IMFDXGIBuffer
+    {
+        [PreserveSig] int GetResource(ref Guid riid, out IntPtr resource);
+        [PreserveSig] int GetSubresourceIndex(out uint index);
+        [PreserveSig] int _GetUnknown();
+        [PreserveSig] int _SetUnknown();
+    }
+
     private static readonly object StartGate = new();
     private static bool started;
 
@@ -288,7 +427,7 @@ internal static class Mf
         [PreserveSig] int _DeleteItem();
         [PreserveSig] int _DeleteAllItems();
         [PreserveSig] int SetUINT32(ref Guid key, uint value);
-        [PreserveSig] int _SetUINT64();
+        [PreserveSig] int SetUINT64(ref Guid key, ulong value);
         [PreserveSig] int _SetDouble();
         [PreserveSig] int SetGUID(ref Guid key, ref Guid value);
         [PreserveSig] int _SetString();
@@ -351,7 +490,7 @@ internal static class Mf
         [PreserveSig] int GetSampleDuration(out long duration);
         [PreserveSig] int SetSampleDuration(long duration);
         [PreserveSig] int _GetBufferCount();
-        [PreserveSig] int _GetBufferByIndex();
+        [PreserveSig] int GetBufferByIndex(uint index, out IMFMediaBuffer buffer);
         [PreserveSig] int ConvertToContiguousBuffer(out IMFMediaBuffer buffer);
         [PreserveSig] int AddBuffer(IMFMediaBuffer buffer);
         [PreserveSig] int _RemoveBufferByIndex();
