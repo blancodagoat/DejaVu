@@ -345,6 +345,103 @@ internal static class Mf
         }
     }
 
+    public static readonly Guid VideoFormat_NV12 = new("3231564E-0000-0010-8000-00AA00389B71");
+
+    /// <summary>
+    /// Decodes up to <paramref name="maxSamples"/> frames of the first video stream and
+    /// returns (decoded frame count, mean luma 0..255). A file that parses but decodes to
+    /// nothing or to black fails here — the check the container metadata can't fake.
+    /// </summary>
+    public static (int Frames, double Luma) ProbeVideo(string path, int maxSamples = 10)
+    {
+        EnsureStarted();
+        Check(MFCreateSourceReaderFromURL(path, IntPtr.Zero, out var reader));
+        try
+        {
+            Check(reader.SetStreamSelection(SOURCE_READER_ALL_STREAMS, false));
+            Check(reader.SetStreamSelection(SOURCE_READER_FIRST_VIDEO_STREAM, true));
+
+            Check(MFCreateMediaType(out var nv12));
+            try
+            {
+                var major = MT_MAJOR_TYPE;
+                var video = MediaType_Video;
+                var sub = MT_SUBTYPE;
+                var fmt = VideoFormat_NV12;
+                Check(nv12.SetGUID(ref major, ref video));
+                Check(nv12.SetGUID(ref sub, ref fmt));
+                Check(reader.SetCurrentMediaType(SOURCE_READER_FIRST_VIDEO_STREAM, IntPtr.Zero, nv12));
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(nv12);
+            }
+
+            int frames = 0;
+            long total = 0;
+            long count = 0;
+            while (frames < maxSamples)
+            {
+                Check(reader.ReadSample(
+                    SOURCE_READER_FIRST_VIDEO_STREAM, 0, out _, out uint flags, out _, out IntPtr samplePtr));
+                if (samplePtr == IntPtr.Zero)
+                {
+                    if ((flags & READERF_ENDOFSTREAM) != 0)
+                    {
+                        break;
+                    }
+
+                    continue;
+                }
+
+                var sample = (IMFSample)Marshal.GetObjectForIUnknown(samplePtr);
+                Marshal.Release(samplePtr);
+                try
+                {
+                    Check(sample.ConvertToContiguousBuffer(out var buffer));
+                    try
+                    {
+                        Check(buffer.Lock(out var data, out _, out uint length));
+                        unsafe
+                        {
+                            // NV12: the first two-thirds of the buffer is the luma plane.
+                            var luma = new ReadOnlySpan<byte>((void*)data, (int)(length * 2 / 3));
+                            // Sample sparsely; exactness is not the point.
+                            for (int i = 0; i < luma.Length; i += 251)
+                            {
+                                total += luma[i];
+                                count++;
+                            }
+                        }
+
+                        Check(buffer.Unlock());
+                    }
+                    finally
+                    {
+                        Marshal.ReleaseComObject(buffer);
+                    }
+
+                    frames++;
+                }
+                finally
+                {
+                    Marshal.ReleaseComObject(sample);
+                }
+
+                if ((flags & READERF_ENDOFSTREAM) != 0)
+                {
+                    break;
+                }
+            }
+
+            return (frames, count == 0 ? 0 : total / (double)count);
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(reader);
+        }
+    }
+
     [DllImport("mfplat.dll")]
     private static extern int MFStartup(int version, int flags);
 

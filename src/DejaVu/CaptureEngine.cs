@@ -102,9 +102,11 @@ internal sealed class CaptureEngine : IDisposable
         width = item.Size.Width;
         height = item.Size.Height;
 
-        // RGB32, not ARGB32: same BGRA memory layout, but the video processor between us
-        // and the encoder accepts the alpha-less form.
-        inputType = CreateVideoType(Mf.VideoFormat_RGB32, stride: width * 4);
+        // ARGB32, deliberately: MF maps it to B8G8R8A8 — the exact format of WGC frame
+        // textures. RGB32 would map to B8G8R8X8, and CopyResource silently no-ops on a
+        // format mismatch, encoding untouched (black) allocator textures. Diagnosed by
+        // decode-probing output that "looked" valid by size and duration.
+        inputType = CreateVideoType(Mf.VideoFormat_ARGB32, stride: width * 4);
 
         // GPU-backed sample pool with hard backpressure: initial 2, max 6 in flight.
         // A slow encoder empties the pool and frames drop — memory stays flat.
@@ -164,7 +166,14 @@ internal sealed class CaptureEngine : IDisposable
         {
             Task.Run(() =>
             {
-                Finalize(old);
+                // Under the gate: Finalize while another thread is inside WriteSample
+                // deadlocks in Media Foundation. Frames arriving during the ~200 ms of
+                // finalization briefly block on the lock — still no lost seconds.
+                lock (gate)
+                {
+                    Finalize(old);
+                }
+
                 onFinalized?.Invoke(frames);
             });
         }
@@ -173,16 +182,13 @@ internal sealed class CaptureEngine : IDisposable
     /// <summary>Stops capture and finalizes the current segment. Blocking.</summary>
     public void Stop()
     {
-        Mf.IMFSinkWriter? old;
         lock (gate)
         {
-            old = writer;
-            writer = null;
-        }
-
-        if (old is not null)
-        {
-            Finalize(old);
+            if (writer is not null)
+            {
+                Finalize(writer);
+                writer = null;
+            }
         }
     }
 
@@ -337,10 +343,13 @@ internal sealed class CaptureEngine : IDisposable
             Marshal.ReleaseComObject(outputType);
         }
 
-        TrySetQualityMode(newWriter, streamIndex);
+        QualityModeActive = TrySetQualityMode(newWriter, streamIndex);
         Mf.Check(newWriter.BeginWriting());
         return newWriter;
     }
+
+    /// <summary>True when the encoder accepted constant-quality rate control.</summary>
+    public bool QualityModeActive { get; private set; }
 
     private Mf.IMFMediaType CreateVideoType(Guid subtype, int stride)
     {
@@ -363,10 +372,16 @@ internal sealed class CaptureEngine : IDisposable
         }
         else
         {
-            // Encoders want a bitrate on the output type even in quality mode; this is
-            // a generous cap, not a target.
+            // Encoders want a bitrate on the output type even in quality mode — and if
+            // quality mode is refused this becomes the actual rate, so scale it with the
+            // preset instead of leaving one generous cap.
             key = Mf.MT_AVG_BITRATE;
-            Mf.Check(type.SetUINT32(ref key, 62_000_000));
+            Mf.Check(type.SetUINT32(ref key, (uint)(quality switch
+            {
+                <= 50 => 12_000_000,
+                <= 70 => 25_000_000,
+                _ => 45_000_000,
+            })));
         }
 
         return type;
@@ -376,7 +391,7 @@ internal sealed class CaptureEngine : IDisposable
     /// Best-effort constant-quality rate control on the encoder behind the sink writer.
     /// Encoders that refuse fall back to the bitrate cap on the output type.
     /// </summary>
-    private void TrySetQualityMode(Mf.IMFSinkWriter target, int stream)
+    private bool TrySetQualityMode(Mf.IMFSinkWriter target, int stream)
     {
         var service = Guid.Empty;
         var iid = IID_ICodecAPI;
@@ -384,7 +399,7 @@ internal sealed class CaptureEngine : IDisposable
         {
             if (target.GetServiceForStream(stream, (IntPtr)(&service), (IntPtr)(&iid), out var ptr) < 0)
             {
-                return;
+                return false;
             }
 
             var codec = (ICodecAPI)Marshal.GetObjectForIUnknown(ptr);
@@ -398,10 +413,11 @@ internal sealed class CaptureEngine : IDisposable
                 var q = CODECAPI_AVEncCommonQuality;
                 object qualityValue = (uint)quality;
                 codec.SetValue(ref q, ref qualityValue);
+                return true;
             }
             catch
             {
-                // Bitrate cap it is.
+                return false; // Bitrate cap it is.
             }
             finally
             {

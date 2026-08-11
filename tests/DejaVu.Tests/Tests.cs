@@ -80,6 +80,25 @@ Eq("cap off-by-nothing at exact fit",
 Eq("oversized single clip survives alone",
     ReplayBuffer.SelectClipsOverCap([("only", 3 * gb, now)], gb).Count, 0);
 
+// Inspect: decode-probe arbitrary files. Usage: -- inspect <file> [<file>...]
+if (args.Length > 1 && args[0] == "inspect")
+{
+    foreach (var file in args.Skip(1))
+    {
+        try
+        {
+            var (frames, luma) = Mf.ProbeVideo(file);
+            Console.WriteLine($"{Path.GetFileName(file)}: decoded {frames} frames, mean luma {luma:F1} ({new FileInfo(file).Length / 1024} KB)");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"{Path.GetFileName(file)}: UNREADABLE — {ex.Message}");
+        }
+    }
+
+    return 0;
+}
+
 // Engine smoke: the new WGC + Media Foundation pipeline. Captures the primary monitor,
 // rotates the writer mid-capture (the gapless seam), then remuxes both segments through
 // the concat path — which also proves the chosen codec survives the save pipeline.
@@ -101,6 +120,7 @@ if (args.Length > 0 && args[0] == "engine")
         Console.WriteLine($"engine codec: {(engine.Codec == Mf.VideoFormat_AV1 ? "AV1" : "H264")} (AV1 hw: {CaptureEngine.Av1Available})");
 
         engine.Start(p1);
+        Console.WriteLine($"quality mode: {(engine.QualityModeActive ? "constant-quality" : "BITRATE FALLBACK")}");
         Thread.Sleep(3000);
         int liveFrames = engine.FramesInSegment;
         using var rotated = new ManualResetEventSlim(false);
@@ -219,8 +239,6 @@ if (args.Length > 0 && args[0] == "smoke")
     // A locked or sleeping screen delivers no frames, and every downstream assertion
     // would fail for reasons that have nothing to do with the code. Probe first.
     {
-        [System.Runtime.InteropServices.DllImport("user32.dll")]
-        static extern IntPtr ProbeMonitorFromPoint(System.Drawing.Point pt, uint flags);
         var probePath = Path.Combine(Path.GetTempPath(), "dejavu_probe.mp4");
         int frames;
         using (var probe = new CaptureEngine(Native.PrimaryMonitor(), IntPtr.Zero, 30, 60))
@@ -255,7 +273,7 @@ if (args.Length > 0 && args[0] == "smoke")
     // Stop() finalizes segments but only Dispose() clears the buffer directory.
     var crashed = new ReplayBuffer(config, segmentSeconds: 4);
     crashed.Failed += e => recordError = e;
-    crashed.RecoverCrashedSession();  // clean slate from any earlier smoke run
+    crashed.RecoverWithTimeout(TimeSpan.FromSeconds(60));  // clean slate from any earlier smoke run
     crashed.Start();
     // Long enough for two full segments even with a cold first-recorder start and the
     // per-seam audio mux.
@@ -269,8 +287,8 @@ if (args.Length > 0 && args[0] == "smoke")
     // Phase 2: next launch recovers the crashed session into a clip.
     using (var buffer = new ReplayBuffer(config, segmentSeconds: 4))
     {
-        var recovered = buffer.RecoverCrashedSession();
-        Check("crashed session recovered", recovered is not null && File.Exists(recovered));
+        var (recovered, recTimedOut) = buffer.RecoverWithTimeout(TimeSpan.FromSeconds(60));
+        Check("crashed session recovered", recovered is not null && !recTimedOut && File.Exists(recovered));
         Check("buffer empty after recovery",
             Directory.GetFiles(AppInfo.BufferDirectory, "seg_*.mp4").Length == 0);
 

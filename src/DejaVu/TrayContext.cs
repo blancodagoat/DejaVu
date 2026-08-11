@@ -71,10 +71,11 @@ internal sealed class TrayContext : ApplicationContext
         }
 
         // Recovery first, off the UI thread — stitching a crashed session's segments can
-        // take a moment and buffering must not restart on top of them.
+        // take a moment and buffering must not restart on top of them. Time-bounded:
+        // a hung recovery must never leave the app sitting dead in the tray.
         Task.Run(() =>
         {
-            var recovered = buffer.RecoverCrashedSession();
+            var (recovered, timedOut) = buffer.RecoverWithTimeout(TimeSpan.FromSeconds(30));
             buffer.Start();
             if (recovered is not null)
             {
@@ -83,6 +84,13 @@ internal sealed class TrayContext : ApplicationContext
                     lastSaved = recovered;
                     Balloon("Replay recovered", $"Saved what the last session buffered: {Path.GetFileName(recovered)}", ToolTipIcon.Info);
                 });
+            }
+            else if (timedOut)
+            {
+                OnUi(() => Balloon(
+                    "Recovery skipped",
+                    "Last session's buffer could not be read; its files were parked in the buffer-quarantine folder.",
+                    ToolTipIcon.Warning));
             }
         });
 

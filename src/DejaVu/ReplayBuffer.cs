@@ -72,6 +72,44 @@ internal sealed class ReplayBuffer : IDisposable
     /// stitched into a clip. The newest segment may be truncated mid-write; if the
     /// stitch fails it is retried without it. The buffer directory ends up empty either way.
     /// </summary>
+    /// <summary>
+    /// Recovery, but never trusted to return: Media Foundation can hang forever parsing
+    /// a file truncated at exactly the wrong byte. On timeout the leftovers are moved to
+    /// a quarantine folder (locked ones stay behind for the next launch) so the app
+    /// starts buffering instead of sitting dead, and nothing is deleted unseen.
+    /// </summary>
+    public (string? Clip, bool TimedOut) RecoverWithTimeout(TimeSpan timeout)
+    {
+        var work = Task.Run(RecoverCrashedSession);
+        if (work.Wait(timeout))
+        {
+            return (work.Result, false);
+        }
+
+        var quarantine = AppInfo.BufferDirectory + "-quarantine";
+        try
+        {
+            Directory.CreateDirectory(quarantine);
+            foreach (var file in Directory.EnumerateFiles(AppInfo.BufferDirectory))
+            {
+                try
+                {
+                    File.Move(file, Path.Combine(quarantine, Path.GetFileName(file)), overwrite: true);
+                }
+                catch
+                {
+                    // Held open by the hung reader; the next launch retries it.
+                }
+            }
+        }
+        catch
+        {
+            // Quarantine is best-effort; buffering still starts.
+        }
+
+        return (null, true);
+    }
+
     public string? RecoverCrashedSession()
     {
         // The in-flight segment of a crashed session is still split into its video and
@@ -100,7 +138,15 @@ internal sealed class ReplayBuffer : IDisposable
                 try
                 {
                     Mp4Concat.Concat(leftovers.GetRange(0, leftovers.Count - drop), output);
-                    return output;
+                    // Concat can "succeed" over truncated inputs yet write a file no
+                    // player opens. A recovered clip that does not decode is garbage —
+                    // never hand it to the user.
+                    if (Mf.ProbeVideo(output, maxSamples: 3).Frames > 0)
+                    {
+                        return output;
+                    }
+
+                    TryDelete(output);
                 }
                 catch
                 {
