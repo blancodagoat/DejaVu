@@ -48,13 +48,21 @@ Everything is configured from the tray menu:
 | **Capture** | Auto (follows the active window's display), a pinned monitor, or one specific window |
 | **Buffer length** | 5 / 10 / 15 / 20 / 25 minutes |
 | **Quality** | Low / Medium / High (constant quality, size varies with content) |
-| **Frame rate** | 30 / 60 fps |
+| **Frame rate** | 30 / 60 / 90 / 120 / 144 / 165 / 240 fps — offered up to what your displays can show |
 | **Clip folder cap** | Off / 10 / 25 / 50 GB — oldest clips roll off; the newest is never touched |
-| **System audio** | recorded into the replay (mic is never captured) |
+| **System audio** | recorded into the replay — with Discord's notifications and voice chat kept out of the mix (see below). The mic is never captured |
 | **Corner indicator** | the dot; excluded from recordings, click-through |
 
-The save hotkey is rebindable in `%APPDATA%\DejaVu\config.json` (e.g. `"Ctrl+Shift+F9"`).
+The save hotkey is rebindable from the tray ("Change save hotkey…").
 Window picks last for the session; displays and auto persist.
+
+## Discord stays out of your clips
+
+Replay audio is captured through Windows' process-loopback device with the Discord
+process tree excluded — voice chat, notification pings, all of it — so a shared clip
+never leaks a private conversation. The excluded apps are configurable as `audioExclude`
+in `config.json` (default: Discord, DiscordCanary, DiscordPTB, Vesktop); an empty list
+records the full system mix.
 
 ## Privacy
 

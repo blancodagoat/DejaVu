@@ -13,6 +13,8 @@ internal sealed class TrayContext : ApplicationContext
     private readonly RecordingIndicator indicator;
     private readonly NotifyIcon tray;
     private readonly ToolStripMenuItem pauseItem;
+    private ToolStripMenuItem? saveItem;
+    private HotkeyDialog? hotkeyDialog;
 
     private string? lastSaved;
     private bool saving;
@@ -98,13 +100,13 @@ internal sealed class TrayContext : ApplicationContext
     {
         var menu = new ContextMenuStrip { Renderer = new DarkMenuRenderer() };
 
-        var save = new ToolStripMenuItem("Save replay", null, (_, _) => SaveReplay())
+        saveItem = new ToolStripMenuItem("Save replay", null, (_, _) => SaveReplay())
         {
             ShortcutKeyDisplayString = config.SaveHotkey.ToString(),
             Font = Theme.Ui(9f, FontStyle.Bold),
         };
 
-        menu.Items.Add(save);
+        menu.Items.Add(saveItem);
         menu.Items.Add(pauseItem);
         menu.Items.Add(new ToolStripSeparator());
 
@@ -144,6 +146,8 @@ internal sealed class TrayContext : ApplicationContext
         startup.Click += (_, _) => { StartupRegistry.TrySet(!StartupRegistry.IsEnabled()); };
         menu.Opening += (_, _) => startup.Checked = StartupRegistry.IsEnabled();
         menu.Items.Add(startup);
+
+        menu.Items.Add(new ToolStripMenuItem("Change save hotkey…", null, (_, _) => ShowHotkeyDialog()));
 
         // Hotkeys are not delivered while an elevated window has focus; running elevated
         // ourselves is the only bypass Windows allows.
@@ -282,6 +286,52 @@ internal sealed class TrayContext : ApplicationContext
             item.Checked = get();
         };
         return item;
+    }
+
+    private void ShowHotkeyDialog()
+    {
+        if (hotkeyDialog is { IsDisposed: false })
+        {
+            hotkeyDialog.Activate();
+            return;
+        }
+
+        hotkeyDialog = new HotkeyDialog(
+            config.SaveHotkey,
+            candidate =>
+            {
+                // Swap live: register the candidate; on refusal put the old one back so
+                // the app is never left without a working hotkey.
+                hotkeys.Unregister(HotkeyId.Save);
+                if (hotkeys.Register(HotkeyId.Save, candidate))
+                {
+                    config.SaveHotkey = candidate;
+                    config.Save();
+                    if (saveItem is not null)
+                    {
+                        saveItem.ShortcutKeyDisplayString = candidate.ToString();
+                    }
+
+                    return true;
+                }
+
+                hotkeys.Register(HotkeyId.Save, config.SaveHotkey);
+                return false;
+            },
+            recording =>
+            {
+                // While the field is armed, the global registration is released so the
+                // current hotkey records instead of firing a save over the dialog.
+                if (recording)
+                {
+                    hotkeys.Unregister(HotkeyId.Save);
+                }
+                else
+                {
+                    hotkeys.Register(HotkeyId.Save, config.SaveHotkey);
+                }
+            });
+        hotkeyDialog.Show();
     }
 
     private void SaveReplay()

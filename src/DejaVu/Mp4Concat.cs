@@ -3,25 +3,25 @@ using System.Runtime.InteropServices;
 namespace DejaVu;
 
 /// <summary>
-/// Stitches MP4 files into one without re-encoding: a Media Foundation source reader pulls
-/// the compressed H.264/AAC samples out of each input and a sink writer drops them into the
-/// output with retimed timestamps. Pass-through remuxing — fast, lossless, no transforms.
-/// Inputs must share encoding parameters, which ours do because one recorder produced them.
+/// Pass-through remuxing on top of <see cref="Mf"/>: compressed H.264/AAC samples are
+/// copied between containers with retimed timestamps — fast, lossless, no transforms.
+/// <see cref="Concat"/> appends files end to end; <see cref="MuxParallel"/> joins a video
+/// file and an audio file onto one timeline.
 /// </summary>
 internal static class Mp4Concat
 {
     public static void Concat(IReadOnlyList<string> inputs, string output)
     {
-        EnsureStarted();
+        Mf.EnsureStarted();
 
         // Every readable input is opened before the sink writer exists, and unreadable
         // ones (still locked by a dying recorder, truncated by a crash) are skipped
         // rather than fatal. A writer is only created once there is something to write,
         // so no failed attempt ever leaves a half-open output file behind.
-        var readers = new List<IMFSourceReader>();
+        var readers = new List<Mf.IMFSourceReader>();
         foreach (var input in inputs)
         {
-            if (MFCreateSourceReaderFromURL(input, IntPtr.Zero, out var candidate) >= 0)
+            if (Mf.MFCreateSourceReaderFromURL(input, IntPtr.Zero, out var candidate) >= 0)
             {
                 readers.Add(candidate);
             }
@@ -45,9 +45,9 @@ internal static class Mp4Concat
         }
     }
 
-    private static void WriteAll(List<IMFSourceReader> readers, string output)
+    private static void WriteAll(List<Mf.IMFSourceReader> readers, string output)
     {
-        Check(MFCreateSinkWriterFromURL(output, IntPtr.Zero, IntPtr.Zero, out var writer));
+        Mf.Check(Mf.MFCreateSinkWriterFromURL(output, IntPtr.Zero, IntPtr.Zero, out var writer));
         try
         {
             // Writer streams are declared from the first input's native types; later inputs
@@ -59,95 +59,93 @@ internal static class Mp4Concat
 
             foreach (var reader in readers)
             {
+                Mf.Check(reader.SetStreamSelection(Mf.SOURCE_READER_ALL_STREAMS, true));
+
+                var streamMap = new Dictionary<uint, int>();
+                for (uint i = 0; reader.GetNativeMediaType(i, 0, out var type) == 0; i++)
                 {
-                    Check(reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, true));
-
-                    var streamMap = new Dictionary<uint, int>();
-                    for (uint i = 0; reader.GetNativeMediaType(i, 0, out var type) == 0; i++)
+                    Mf.Check(type.GetMajorType(out var major));
+                    int outIndex;
+                    if (major == Mf.MediaType_Video)
                     {
-                        Check(type.GetMajorType(out var major));
-                        int outIndex;
-                        if (major == MFMediaType_Video)
+                        if (videoOut < 0)
                         {
-                            if (videoOut < 0)
-                            {
-                                Check(writer.AddStream(type, out videoOut));
-                                Check(writer.SetInputMediaType(videoOut, type, IntPtr.Zero));
-                            }
-
-                            outIndex = videoOut;
-                        }
-                        else if (major == MFMediaType_Audio)
-                        {
-                            if (audioOut < 0)
-                            {
-                                Check(writer.AddStream(type, out audioOut));
-                                Check(writer.SetInputMediaType(audioOut, type, IntPtr.Zero));
-                            }
-
-                            outIndex = audioOut;
-                        }
-                        else
-                        {
-                            Marshal.ReleaseComObject(type);
-                            continue;
+                            Mf.Check(writer.AddStream(type, out videoOut));
+                            Mf.Check(writer.SetInputMediaType(videoOut, type, IntPtr.Zero));
                         }
 
-                        streamMap[i] = outIndex;
+                        outIndex = videoOut;
+                    }
+                    else if (major == Mf.MediaType_Audio)
+                    {
+                        if (audioOut < 0)
+                        {
+                            Mf.Check(writer.AddStream(type, out audioOut));
+                            Mf.Check(writer.SetInputMediaType(audioOut, type, IntPtr.Zero));
+                        }
+
+                        outIndex = audioOut;
+                    }
+                    else
+                    {
                         Marshal.ReleaseComObject(type);
+                        continue;
                     }
 
-                    if (streamMap.Count == 0)
+                    streamMap[i] = outIndex;
+                    Marshal.ReleaseComObject(type);
+                }
+
+                if (streamMap.Count == 0)
+                {
+                    continue;
+                }
+
+                if (!began)
+                {
+                    Mf.Check(writer.BeginWriting());
+                    began = true;
+                }
+
+                long fileEnd = 0;
+                int ended = 0;
+                while (ended < streamMap.Count)
+                {
+                    Mf.Check(reader.ReadSample(
+                        Mf.SOURCE_READER_ANY_STREAM, 0, out uint streamIndex, out uint flags,
+                        out _, out IntPtr samplePtr));
+
+                    if ((flags & Mf.READERF_ENDOFSTREAM) != 0)
+                    {
+                        ended++;
+                    }
+
+                    if (samplePtr == IntPtr.Zero)
                     {
                         continue;
                     }
 
-                    if (!began)
+                    var sample = (Mf.IMFSample)Marshal.GetObjectForIUnknown(samplePtr);
+                    Marshal.Release(samplePtr);
+
+                    if (streamMap.TryGetValue(streamIndex, out int outIndex))
                     {
-                        Check(writer.BeginWriting());
-                        began = true;
+                        Mf.Check(sample.GetSampleTime(out long time));
+                        // Duration is optional on compressed samples; absent counts as zero.
+                        long duration = sample.GetSampleDuration(out long d) == 0 ? d : 0;
+                        fileEnd = Math.Max(fileEnd, time + duration);
+
+                        Mf.Check(sample.SetSampleTime(time + offset));
+                        Mf.Check(writer.WriteSample(outIndex, sample));
                     }
 
-                    long fileEnd = 0;
-                    int ended = 0;
-                    while (ended < streamMap.Count)
-                    {
-                        Check(reader.ReadSample(
-                            MF_SOURCE_READER_ANY_STREAM, 0, out uint streamIndex, out uint flags,
-                            out _, out IntPtr samplePtr));
-
-                        if ((flags & MF_SOURCE_READERF_ENDOFSTREAM) != 0)
-                        {
-                            ended++;
-                        }
-
-                        if (samplePtr == IntPtr.Zero)
-                        {
-                            continue;
-                        }
-
-                        var sample = (IMFSample)Marshal.GetObjectForIUnknown(samplePtr);
-                        Marshal.Release(samplePtr);
-
-                        if (streamMap.TryGetValue(streamIndex, out int outIndex))
-                        {
-                            Check(sample.GetSampleTime(out long time));
-                            // Duration is optional on compressed samples; absent counts as zero.
-                            long duration = sample.GetSampleDuration(out long d) == 0 ? d : 0;
-                            fileEnd = Math.Max(fileEnd, time + duration);
-
-                            Check(sample.SetSampleTime(time + offset));
-                            Check(writer.WriteSample(outIndex, sample));
-                        }
-
-                        Marshal.ReleaseComObject(sample);
-                    }
-
-                    offset += fileEnd;
+                    Marshal.ReleaseComObject(sample);
                 }
+
+                offset += fileEnd;
             }
 
-            Check(writer.Finalize_());
+            Mf.Check(writer.Finalize_());
         }
         finally
         {
@@ -155,183 +153,98 @@ internal static class Mp4Concat
         }
     }
 
-    private static readonly object StartGate = new();
-    private static bool started;
-
-    private static void EnsureStarted()
+    /// <summary>
+    /// Joins a video-only file and an audio-only file onto one timeline, timestamps
+    /// untouched. Samples are fed in timestamp order so the sink writer interleaves as it
+    /// goes instead of buffering a whole stream.
+    /// </summary>
+    public static void MuxParallel(string videoPath, string audioPath, string output)
     {
-        lock (StartGate)
+        Mf.EnsureStarted();
+
+        Mf.Check(Mf.MFCreateSourceReaderFromURL(videoPath, IntPtr.Zero, out var video));
+        try
         {
-            if (!started)
+            Mf.Check(Mf.MFCreateSourceReaderFromURL(audioPath, IntPtr.Zero, out var audio));
+            try
             {
-                Check(MFStartup(MF_VERSION, 0));
-                started = true;
+                Mf.Check(Mf.MFCreateSinkWriterFromURL(output, IntPtr.Zero, IntPtr.Zero, out var writer));
+                try
+                {
+                    int videoOut = AddFirstStream(writer, video, Mf.SOURCE_READER_FIRST_VIDEO_STREAM);
+                    int audioOut = AddFirstStream(writer, audio, Mf.SOURCE_READER_FIRST_AUDIO_STREAM);
+                    Mf.Check(writer.BeginWriting());
+
+                    var nextVideo = Read(video, Mf.SOURCE_READER_FIRST_VIDEO_STREAM);
+                    var nextAudio = Read(audio, Mf.SOURCE_READER_FIRST_AUDIO_STREAM);
+                    while (nextVideo is not null || nextAudio is not null)
+                    {
+                        bool takeVideo = nextAudio is null
+                            || (nextVideo is not null && nextVideo.Value.Time <= nextAudio.Value.Time);
+                        if (takeVideo)
+                        {
+                            Mf.Check(writer.WriteSample(videoOut, nextVideo!.Value.Sample));
+                            Marshal.ReleaseComObject(nextVideo.Value.Sample);
+                            nextVideo = Read(video, Mf.SOURCE_READER_FIRST_VIDEO_STREAM);
+                        }
+                        else
+                        {
+                            Mf.Check(writer.WriteSample(audioOut, nextAudio!.Value.Sample));
+                            Marshal.ReleaseComObject(nextAudio.Value.Sample);
+                            nextAudio = Read(audio, Mf.SOURCE_READER_FIRST_AUDIO_STREAM);
+                        }
+                    }
+
+                    Mf.Check(writer.Finalize_());
+                }
+                finally
+                {
+                    Marshal.ReleaseComObject(writer);
+                }
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(audio);
             }
         }
-    }
-
-    private static void Check(int hr)
-    {
-        if (hr < 0)
+        finally
         {
-            Marshal.ThrowExceptionForHR(hr);
+            Marshal.ReleaseComObject(video);
         }
     }
 
-    private const int MF_VERSION = 0x00020070;
-    private const uint MF_SOURCE_READER_ALL_STREAMS = 0xFFFFFFFE;
-    private const uint MF_SOURCE_READER_ANY_STREAM = 0xFFFFFFFE;
-    private const uint MF_SOURCE_READERF_ENDOFSTREAM = 0x00000002;
-
-    private static readonly Guid MFMediaType_Video = new("73646976-0000-0010-8000-00AA00389B71");
-    private static readonly Guid MFMediaType_Audio = new("73647561-0000-0010-8000-00AA00389B71");
-
-    [DllImport("mfplat.dll")]
-    private static extern int MFStartup(int version, int flags);
-
-    [DllImport("mfreadwrite.dll", CharSet = CharSet.Unicode)]
-    private static extern int MFCreateSourceReaderFromURL(
-        string url, IntPtr attributes, out IMFSourceReader reader);
-
-    [DllImport("mfreadwrite.dll", CharSet = CharSet.Unicode)]
-    private static extern int MFCreateSinkWriterFromURL(
-        string url, IntPtr byteStream, IntPtr attributes, out IMFSinkWriter writer);
-
-    // The interfaces below are declared flat (no managed inheritance) because the CLR lays
-    // out ComImport vtables per declared interface; only the slots actually called carry
-    // real signatures, the rest are order-preserving placeholders.
-
-    [ComImport]
-    [Guid("70ae66f2-c809-4e4f-8915-bdcb406b7993")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IMFSourceReader
+    private static int AddFirstStream(Mf.IMFSinkWriter writer, Mf.IMFSourceReader reader, uint stream)
     {
-        [PreserveSig] int GetStreamSelection(uint streamIndex, out bool selected);
-        [PreserveSig] int SetStreamSelection(uint streamIndex, [MarshalAs(UnmanagedType.Bool)] bool selected);
-        [PreserveSig] int GetNativeMediaType(uint streamIndex, uint typeIndex, out IMFMediaType type);
-        [PreserveSig] int GetCurrentMediaType(uint streamIndex, out IMFMediaType type);
-        [PreserveSig] int SetCurrentMediaType(uint streamIndex, IntPtr reserved, IMFMediaType type);
-        [PreserveSig] int SetCurrentPosition(IntPtr guidTimeFormat, IntPtr position);
-        [PreserveSig] int ReadSample(
-            uint streamIndex, uint controlFlags, out uint actualStreamIndex, out uint streamFlags,
-            out long timestamp, out IntPtr sample);
-        [PreserveSig] int Flush(uint streamIndex);
-        [PreserveSig] int GetServiceForStream(uint streamIndex, IntPtr service, IntPtr riid, out IntPtr obj);
-        [PreserveSig] int GetPresentationAttribute(uint streamIndex, IntPtr attribute, IntPtr value);
+        Mf.Check(reader.GetNativeMediaType(stream, 0, out var type));
+        try
+        {
+            Mf.Check(writer.AddStream(type, out int index));
+            Mf.Check(writer.SetInputMediaType(index, type, IntPtr.Zero));
+            return index;
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(type);
+        }
     }
 
-    [ComImport]
-    [Guid("3137f1cd-fe5e-4805-a5d8-fb477448cb3d")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IMFSinkWriter
+    private static (Mf.IMFSample Sample, long Time)? Read(Mf.IMFSourceReader reader, uint stream)
     {
-        [PreserveSig] int AddStream(IMFMediaType type, out int streamIndex);
-        [PreserveSig] int SetInputMediaType(int streamIndex, IMFMediaType type, IntPtr parameters);
-        [PreserveSig] int BeginWriting();
-        [PreserveSig] int WriteSample(int streamIndex, IMFSample sample);
-        [PreserveSig] int SendStreamTick(int streamIndex, long timestamp);
-        [PreserveSig] int PlaceMarker(int streamIndex, IntPtr context);
-        [PreserveSig] int NotifyEndOfSegment(int streamIndex);
-        [PreserveSig] int Flush(int streamIndex);
-        [PreserveSig] int Finalize_();
-        [PreserveSig] int GetServiceForStream(int streamIndex, IntPtr service, IntPtr riid, out IntPtr obj);
-        [PreserveSig] int GetStatistics(int streamIndex, IntPtr statistics);
-    }
+        while (true)
+        {
+            Mf.Check(reader.ReadSample(stream, 0, out _, out uint flags, out _, out IntPtr samplePtr));
+            if (samplePtr != IntPtr.Zero)
+            {
+                var sample = (Mf.IMFSample)Marshal.GetObjectForIUnknown(samplePtr);
+                Marshal.Release(samplePtr);
+                Mf.Check(sample.GetSampleTime(out long time));
+                return (sample, time);
+            }
 
-    [ComImport]
-    [Guid("44ae0fa8-ea31-4109-8d2e-4cae4997c555")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IMFMediaType
-    {
-        // IMFAttributes
-        [PreserveSig] int _GetItem();
-        [PreserveSig] int _GetItemType();
-        [PreserveSig] int _CompareItem();
-        [PreserveSig] int _Compare();
-        [PreserveSig] int _GetUINT32();
-        [PreserveSig] int _GetUINT64();
-        [PreserveSig] int _GetDouble();
-        [PreserveSig] int _GetGUID();
-        [PreserveSig] int _GetStringLength();
-        [PreserveSig] int _GetString();
-        [PreserveSig] int _GetAllocatedString();
-        [PreserveSig] int _GetBlobSize();
-        [PreserveSig] int _GetBlob();
-        [PreserveSig] int _GetAllocatedBlob();
-        [PreserveSig] int _GetUnknown();
-        [PreserveSig] int _SetItem();
-        [PreserveSig] int _DeleteItem();
-        [PreserveSig] int _DeleteAllItems();
-        [PreserveSig] int _SetUINT32();
-        [PreserveSig] int _SetUINT64();
-        [PreserveSig] int _SetDouble();
-        [PreserveSig] int _SetGUID();
-        [PreserveSig] int _SetString();
-        [PreserveSig] int _SetBlob();
-        [PreserveSig] int _SetUnknown();
-        [PreserveSig] int _LockStore();
-        [PreserveSig] int _UnlockStore();
-        [PreserveSig] int _GetCount();
-        [PreserveSig] int _GetItemByIndex();
-        [PreserveSig] int _CopyAllItems();
-        // IMFMediaType
-        [PreserveSig] int GetMajorType(out Guid majorType);
-        [PreserveSig] int _IsCompressedFormat();
-        [PreserveSig] int _IsEqual();
-        [PreserveSig] int _GetRepresentation();
-        [PreserveSig] int _FreeRepresentation();
-    }
-
-    [ComImport]
-    [Guid("c40a00f2-b93a-4d80-ae8c-5a1c634f58e4")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IMFSample
-    {
-        // IMFAttributes
-        [PreserveSig] int _GetItem();
-        [PreserveSig] int _GetItemType();
-        [PreserveSig] int _CompareItem();
-        [PreserveSig] int _Compare();
-        [PreserveSig] int _GetUINT32();
-        [PreserveSig] int _GetUINT64();
-        [PreserveSig] int _GetDouble();
-        [PreserveSig] int _GetGUID();
-        [PreserveSig] int _GetStringLength();
-        [PreserveSig] int _GetString();
-        [PreserveSig] int _GetAllocatedString();
-        [PreserveSig] int _GetBlobSize();
-        [PreserveSig] int _GetBlob();
-        [PreserveSig] int _GetAllocatedBlob();
-        [PreserveSig] int _GetUnknown();
-        [PreserveSig] int _SetItem();
-        [PreserveSig] int _DeleteItem();
-        [PreserveSig] int _DeleteAllItems();
-        [PreserveSig] int _SetUINT32();
-        [PreserveSig] int _SetUINT64();
-        [PreserveSig] int _SetDouble();
-        [PreserveSig] int _SetGUID();
-        [PreserveSig] int _SetString();
-        [PreserveSig] int _SetBlob();
-        [PreserveSig] int _SetUnknown();
-        [PreserveSig] int _LockStore();
-        [PreserveSig] int _UnlockStore();
-        [PreserveSig] int _GetCount();
-        [PreserveSig] int _GetItemByIndex();
-        [PreserveSig] int _CopyAllItems();
-        // IMFSample
-        [PreserveSig] int _GetSampleFlags();
-        [PreserveSig] int _SetSampleFlags();
-        [PreserveSig] int GetSampleTime(out long time);
-        [PreserveSig] int SetSampleTime(long time);
-        [PreserveSig] int GetSampleDuration(out long duration);
-        [PreserveSig] int _SetSampleDuration();
-        [PreserveSig] int _GetBufferCount();
-        [PreserveSig] int _GetBufferByIndex();
-        [PreserveSig] int _ConvertToContiguousBuffer();
-        [PreserveSig] int _AddBuffer();
-        [PreserveSig] int _RemoveBufferByIndex();
-        [PreserveSig] int _RemoveAllBuffers();
-        [PreserveSig] int _GetTotalLength();
-        [PreserveSig] int _CopyToBuffer();
+            if ((flags & Mf.READERF_ENDOFSTREAM) != 0)
+            {
+                return null;
+            }
+        }
     }
 }

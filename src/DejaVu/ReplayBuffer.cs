@@ -29,6 +29,11 @@ internal sealed class ReplayBuffer : IDisposable
     private IntPtr windowTarget;
     private bool sourceFallback;
     private int consecutiveFailures;
+    private bool audioWarned;
+
+    // ponytail: audio starts on the recorder's first-frame status change, which lands
+    // A/V sync within ~100 ms; frame-accurate alignment would need timestamps from a
+    // shared clock across both pipelines.
 
 
     public ReplayBuffer(AppConfig config, int segmentSeconds = 60)
@@ -69,6 +74,17 @@ internal sealed class ReplayBuffer : IDisposable
     /// </summary>
     public string? RecoverCrashedSession()
     {
+        // The in-flight segment of a crashed session is still split into its video and
+        // audio halves. Join what can be joined so the recovered clip includes it.
+        foreach (var video in Directory.EnumerateFiles(AppInfo.BufferDirectory, "vid_*.mp4"))
+        {
+            var stamp = Path.GetFileNameWithoutExtension(video)["vid_".Length..];
+            JoinSegment(
+                video,
+                Path.Combine(AppInfo.BufferDirectory, $"aud_{stamp}.mp4"),
+                Path.Combine(AppInfo.BufferDirectory, $"{SegmentPrefix}{stamp}.mp4"));
+        }
+
         var leftovers = ListSegments().OrderBy(s => s.Start).Select(s => s.Path).ToList();
         if (leftovers.Count == 0)
         {
@@ -112,6 +128,7 @@ internal sealed class ReplayBuffer : IDisposable
             running = true;
             sourceFallback = false;
             consecutiveFailures = 0;
+            audioWarned = false;
             StartSegment();
         }
     }
@@ -299,21 +316,50 @@ internal sealed class ReplayBuffer : IDisposable
     /// <summary>Caller must hold <see cref="gate"/>.</summary>
     private void StartSegment()
     {
-        var path = Path.Combine(
-            AppInfo.BufferDirectory,
-            $"{SegmentPrefix}{DateTime.Now.ToString(TimeFormat, CultureInfo.InvariantCulture)}.mp4");
+        var stamp = DateTime.Now.ToString(TimeFormat, CultureInfo.InvariantCulture);
+        var videoPath = Path.Combine(AppInfo.BufferDirectory, $"vid_{stamp}.mp4");
+        var audioPath = Path.Combine(AppInfo.BufferDirectory, $"aud_{stamp}.mp4");
+        var segmentPath = Path.Combine(AppInfo.BufferDirectory, $"{SegmentPrefix}{stamp}.mp4");
 
         var done = new ManualResetEventSlim(false);
         var recorder = Recorder.CreateRecorder(BuildOptions());
+        AudioLoopback? audio = null;
+
+        if (config.SystemAudio)
+        {
+            // Audio starts when the recorder reports its first frames, so both timelines
+            // begin together (within ~100 ms — see the ponytail note below).
+            recorder.OnStatusChanged += (_, e) =>
+            {
+                if (e.Status == RecorderStatus.Recording && audio is null)
+                {
+                    audio = AudioLoopback.TryStart(audioPath, FindExcludePid());
+                    if (audio is null && !audioWarned)
+                    {
+                        audioWarned = true;
+                        Failed?.Invoke("Audio capture failed; replays will be silent.");
+                    }
+                }
+            };
+        }
 
         recorder.OnRecordingComplete += (_, _) =>
         {
-            done.Set();
             // Read before dispose. Zero frames across a whole segment means the source
             // silently delivered nothing (seen with some multi-adapter display setups) —
             // a static screen still yields its initial frames, so this does not misfire
             // on an idle desktop.
             bool healthy = recorder.CurrentFrameNumber > 0;
+
+            // The finished segment must exist before done is signalled, because Save()
+            // waits on it and then lists segment files.
+            audio?.Dispose();
+            if (healthy)
+            {
+                JoinSegment(videoPath, audioPath, segmentPath);
+            }
+
+            done.Set();
             Prune();
             Task.Run(recorder.Dispose);
             lock (gate)
@@ -325,7 +371,8 @@ internal sealed class ReplayBuffer : IDisposable
                 // display — reported once, never silently.
                 if (!healthy)
                 {
-                    TryDelete(path);
+                    TryDelete(videoPath);
+                    TryDelete(audioPath);
                     if (!sourceFallback)
                     {
                         sourceFallback = true;
@@ -348,8 +395,10 @@ internal sealed class ReplayBuffer : IDisposable
 
         recorder.OnRecordingFailed += (_, e) =>
         {
+            audio?.Dispose();
             done.Set();
-            TryDelete(path);
+            TryDelete(videoPath);
+            TryDelete(audioPath);
             Task.Run(recorder.Dispose);
             lock (gate)
             {
@@ -364,10 +413,81 @@ internal sealed class ReplayBuffer : IDisposable
             }
         };
 
-        recorder.Record(path);
+        recorder.Record(videoPath);
         current = recorder;
         currentDone = done;
         cycleTimer.Change(TimeSpan.FromSeconds(segmentSeconds), Timeout.InfiniteTimeSpan);
+    }
+
+    /// <summary>
+    /// Turns a finished video (and its audio chunk, when one exists) into the final
+    /// segment file. A failed mux degrades to silent video — a replay without audio
+    /// beats no replay.
+    /// </summary>
+    private static void JoinSegment(string videoPath, string audioPath, string segmentPath)
+    {
+        try
+        {
+            if (File.Exists(audioPath))
+            {
+                Mp4Concat.MuxParallel(videoPath, audioPath, segmentPath);
+                TryDelete(videoPath);
+                TryDelete(audioPath);
+                return;
+            }
+        }
+        catch
+        {
+            TryDelete(segmentPath);
+            TryDelete(audioPath);
+        }
+
+        try
+        {
+            File.Move(videoPath, segmentPath, overwrite: true);
+        }
+        catch
+        {
+            // The video file itself is gone or locked; the segment is lost.
+        }
+    }
+
+    private int FindExcludePid()
+    {
+        foreach (var name in config.AudioExclude)
+        {
+            System.Diagnostics.Process? oldest = null;
+            foreach (var process in System.Diagnostics.Process.GetProcessesByName(name))
+            {
+                try
+                {
+                    // The earliest-started process is the root of the tree; excluding it
+                    // covers the child processes that actually render voice audio.
+                    if (oldest is null || process.StartTime < oldest.StartTime)
+                    {
+                        oldest?.Dispose();
+                        oldest = process;
+                    }
+                    else
+                    {
+                        process.Dispose();
+                    }
+                }
+                catch
+                {
+                    process.Dispose();
+                }
+            }
+
+            if (oldest is not null)
+            {
+                int pid = oldest.Id;
+                oldest.Dispose();
+                return pid;
+            }
+        }
+
+        return 0;
     }
 
     /// <summary>
@@ -435,11 +555,11 @@ internal sealed class ReplayBuffer : IDisposable
                 EncoderProfile = H264Profile.Main,
             },
         },
+        // Audio is captured by AudioLoopback (which can keep Discord out of the mix) and
+        // muxed in per segment; the recorder itself always writes silent video.
         AudioOptions = new AudioOptions
         {
-            IsAudioEnabled = config.SystemAudio,
-            IsOutputDeviceEnabled = true,
-            IsInputDeviceEnabled = false,
+            IsAudioEnabled = false,
         },
         MouseOptions = new MouseOptions
         {

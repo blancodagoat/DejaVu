@@ -22,6 +22,7 @@ internal sealed class ConfigFile
     public bool? SystemAudio { get; set; }
     public int? ClipCapGB { get; set; }
     public string? CaptureTarget { get; set; }
+    public string[]? AudioExclude { get; set; }
 }
 
 [JsonSourceGenerationOptions(WriteIndented = true, PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
@@ -33,8 +34,19 @@ internal sealed partial class ConfigJsonContext : JsonSerializerContext
 internal sealed class AppConfig
 {
     public static readonly int[] BufferChoices = [5, 10, 15, 20, 25];
-    public static readonly int[] FpsChoices = [30, 60];
     public static readonly int[] ClipCapChoices = [0, 10, 25, 50];
+
+    /// <summary>
+    /// 30 and 60 always; higher standard steps only up to what some attached display can
+    /// actually show (with 1 Hz tolerance for panels reporting 59/143). Computed once at
+    /// startup — a hot-plugged faster monitor is picked up on the next launch.
+    /// </summary>
+    public static readonly int[] FpsChoices = BuildFpsChoices(Native.MaxDisplayRefresh());
+
+    public static int[] BuildFpsChoices(int maxRefresh) =>
+        new[] { 30, 60, 90, 120, 144, 165, 240 }
+            .Where(f => f <= 60 || f <= maxRefresh + 1)
+            .ToArray();
 
     public int BufferMinutes { get; set; } = 5;
 
@@ -59,6 +71,13 @@ internal sealed class AppConfig
 
     /// <summary>True when no config existed on disk — the app's very first launch.</summary>
     public bool FirstRun { get; private set; }
+
+    /// <summary>
+    /// Process names whose audio stays out of replays. The first one found running has
+    /// its whole process tree excluded from the loopback mix — voice chat, notification
+    /// pings, everything. Empty list = capture the full system mix.
+    /// </summary>
+    public string[] AudioExclude { get; set; } = ["Discord", "DiscordCanary", "DiscordPTB", "Vesktop"];
 
     /// <summary>
     /// Constant-quality target (1–100) for the encoder's quality rate-control mode.
@@ -142,8 +161,14 @@ internal sealed class AppConfig
                     config.ClipCapGB = Math.Max(0, file.ClipCapGB ?? 0);
                     config.CaptureTarget = string.IsNullOrWhiteSpace(file.CaptureTarget)
                         ? "auto" : file.CaptureTarget;
+                    if (file.AudioExclude is not null)
+                    {
+                        config.AudioExclude = file.AudioExclude;
+                    }
+
                     rewrite |= file.ShowIndicator is null || file.SystemAudio is null
-                        || file.ClipCapGB is null || file.CaptureTarget is null;
+                        || file.ClipCapGB is null || file.CaptureTarget is null
+                        || file.AudioExclude is null;
                 }
             }
         }
@@ -176,6 +201,7 @@ internal sealed class AppConfig
                 SystemAudio = SystemAudio,
                 ClipCapGB = ClipCapGB,
                 CaptureTarget = CaptureTarget,
+                AudioExclude = AudioExclude,
             };
 
             File.WriteAllText(

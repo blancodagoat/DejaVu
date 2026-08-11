@@ -6,6 +6,11 @@ namespace DejaVu;
 internal static class Native
 {
     public const int WM_HOTKEY = 0x0312;
+    public const int WM_KEYUP = 0x0101;
+    public const int WM_SYSKEYUP = 0x0105;
+    public const int VK_SNAPSHOT = 0x2C;
+    private const int VK_LWIN = 0x5B;
+    private const int VK_RWIN = 0x5C;
 
     /// <summary>Posted to the hotkey window by the single-instance watcher.</summary>
     public const int WM_APP_SHOW_SETTINGS = 0x0400 + 17;
@@ -41,6 +46,26 @@ internal static class Native
     public static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint affinity);
 
     [DllImport("user32.dll")]
+    private static extern short GetKeyState(int virtualKey);
+
+    /// <summary>True while the Windows key is physically held down.</summary>
+    public static bool IsWinKeyDown() =>
+        (GetKeyState(VK_LWIN) & 0x8000) != 0 || (GetKeyState(VK_RWIN) & 0x8000) != 0;
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hWnd, int attribute, ref int value, int size);
+
+    /// <summary>Best-effort dark title bar. Attribute 20 on current builds, 19 on older Win10.</summary>
+    public static void TryUseDarkTitleBar(IntPtr hWnd)
+    {
+        int on = 1;
+        if (DwmSetWindowAttribute(hWnd, 20, ref on, sizeof(int)) != 0)
+        {
+            DwmSetWindowAttribute(hWnd, 19, ref on, sizeof(int));
+        }
+    }
+
+    [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
 
     [DllImport("user32.dll")]
@@ -72,6 +97,66 @@ internal static class Native
     private struct RECT
     {
         public int Left, Top, Right, Bottom;
+    }
+
+    private const int ENUM_CURRENT_SETTINGS = -1;
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool EnumDisplaySettingsW(string? deviceName, int modeNum, ref DEVMODE devMode);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool EnumDisplayDevicesW(string? device, uint devNum, ref DISPLAY_DEVICE displayDevice, uint flags);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct DEVMODE
+    {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+        public ushort dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+        public uint dmFields;
+        public int dmPositionX, dmPositionY;
+        public uint dmDisplayOrientation, dmDisplayFixedOutput;
+        public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+        public ushort dmLogPixels;
+        public uint dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+        public uint dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2;
+        public uint dmPanningWidth, dmPanningHeight;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct DISPLAY_DEVICE
+    {
+        public uint cb;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string DeviceName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceString;
+        public uint StateFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceID;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceKey;
+    }
+
+    /// <summary>The highest refresh rate any attached display is currently running at.</summary>
+    public static int MaxDisplayRefresh()
+    {
+        int max = 60;
+        try
+        {
+            var device = new DISPLAY_DEVICE { cb = (uint)Marshal.SizeOf<DISPLAY_DEVICE>() };
+            for (uint i = 0; EnumDisplayDevicesW(null, i, ref device, 0); i++)
+            {
+                var mode = new DEVMODE { dmSize = (ushort)Marshal.SizeOf<DEVMODE>() };
+                if (EnumDisplaySettingsW(device.DeviceName, ENUM_CURRENT_SETTINGS, ref mode)
+                    && mode.dmDisplayFrequency > max)
+                {
+                    max = (int)mode.dmDisplayFrequency;
+                }
+            }
+        }
+        catch
+        {
+            // 60 is always a safe answer.
+        }
+
+        return max;
     }
 
     /// <summary>GDI device name (\\.\DISPLAY1) of the monitor hosting the foreground window.</summary>

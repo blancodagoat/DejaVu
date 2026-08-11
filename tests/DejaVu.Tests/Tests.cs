@@ -80,6 +80,88 @@ Eq("cap off-by-nothing at exact fit",
 Eq("oversized single clip survives alone",
     ReplayBuffer.SelectClipsOverCap([("only", 3 * gb, now)], gb).Count, 0);
 
+// Live audio: prove process-tree exclusion works, using ourselves as the excluded app.
+// A tone plays from this process; captured system audio with our tree excluded must be
+// silent while an unexcluded capture hears it. Needs an unmuted default output device.
+if (args.Length > 0 && args[0] is "smoke" or "audio")
+{
+    // Exclusion removes OUR audio from the mix but rightly keeps everything else, so the
+    // system's ambient level is measured first and all assertions are relative to it.
+    double ambient = CaptureLevel(excludePid: 0);
+
+    var toneWav = Path.Combine(Path.GetTempPath(), "dejavu_tone.wav");
+    WriteToneWav(toneWav);
+    using var player = new System.Media.SoundPlayer(toneWav);
+    player.PlayLooping();
+    try
+    {
+        double heard = CaptureLevel(excludePid: 0);
+        double tone = heard - ambient;
+        if (tone < 0.002)
+        {
+            Console.WriteLine(
+                $"SKIP audio: tone not measurable over ambient (ambient {ambient:F4}, with tone {heard:F4}) — muted or loud system.");
+        }
+        else
+        {
+            double excluded = CaptureLevel(excludePid: Environment.ProcessId);
+            Check("exclusion strips our tone from the mix", excluded < ambient + tone / 10,
+                $"ambient {ambient:F5}, with tone {heard:F5}, excluded {excluded:F5}");
+            Console.WriteLine($"audio levels: ambient {ambient:F4}, +tone {heard:F4}, excluded {excluded:F4}");
+        }
+    }
+    finally
+    {
+        player.Stop();
+    }
+
+    static double CaptureLevel(int excludePid)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"dejavu_cap_{excludePid}.mp4");
+        using (var capture = AudioLoopback.TryStart(path, excludePid))
+        {
+            if (capture is null)
+            {
+                return -1;
+            }
+
+            Thread.Sleep(2500);
+        }
+
+        double level = Mf.MeasureAudioLevel(path);
+        File.Delete(path);
+        return level;
+    }
+
+    static void WriteToneWav(string path)
+    {
+        const int rate = 44100, seconds = 2;
+        var samples = new short[rate * seconds];
+        for (int i = 0; i < samples.Length; i++)
+        {
+            samples[i] = (short)(Math.Sin(2 * Math.PI * 440 * i / rate) * 12000);
+        }
+
+        using var writer = new BinaryWriter(File.Create(path));
+        writer.Write("RIFF"u8);
+        writer.Write(36 + samples.Length * 2);
+        writer.Write("WAVEfmt "u8);
+        writer.Write(16);
+        writer.Write((short)1);
+        writer.Write((short)1);
+        writer.Write(rate);
+        writer.Write(rate * 2);
+        writer.Write((short)2);
+        writer.Write((short)16);
+        writer.Write("data"u8);
+        writer.Write(samples.Length * 2);
+        foreach (var s in samples)
+        {
+            writer.Write(s);
+        }
+    }
+}
+
 // Live smoke: real capture, real concat.
 if (args.Length > 0 && args[0] == "smoke")
 {
@@ -126,11 +208,14 @@ if (args.Length > 0 && args[0] == "smoke")
     crashed.Failed += e => recordError = e;
     crashed.RecoverCrashedSession();  // clean slate from any earlier smoke run
     crashed.Start();
-    Thread.Sleep(10_000);
+    // Long enough for two full segments even with a cold first-recorder start and the
+    // per-seam audio mux.
+    Thread.Sleep(14_000);
     crashed.Stop();
     Check("no recorder failures", recordError is null, recordError);
     var crashLeftovers = Directory.GetFiles(AppInfo.BufferDirectory, "seg_*.mp4");
-    Check("crash left segments behind", crashLeftovers.Length >= 2, $"got {crashLeftovers.Length}");
+    Check("crash left segments behind", crashLeftovers.Length >= 2,
+        $"segments: {crashLeftovers.Length}; all files: {string.Join(", ", Directory.GetFiles(AppInfo.BufferDirectory).Select(Path.GetFileName))}");
 
     // Phase 2: next launch recovers the crashed session into a clip.
     using (var buffer = new ReplayBuffer(config, segmentSeconds: 4))
