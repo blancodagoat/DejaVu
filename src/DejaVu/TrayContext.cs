@@ -1,0 +1,242 @@
+using System.Diagnostics;
+
+namespace DejaVu;
+
+/// <summary>The tray icon is the whole UI: every setting lives in its context menu.</summary>
+internal sealed class TrayContext : ApplicationContext
+{
+    private readonly AppConfig config;
+    private readonly ReplayBuffer buffer;
+    private readonly HotkeyWindow hotkeys;
+    private readonly SystemTheme theme;
+    private readonly RecordingIndicator indicator;
+    private readonly NotifyIcon tray;
+    private readonly ToolStripMenuItem pauseItem;
+
+    private string? lastSaved;
+    private bool saving;
+
+    public TrayContext(SingleInstance instance)
+    {
+        config = AppConfig.Load();
+        buffer = new ReplayBuffer(config);
+        buffer.Failed += error => OnUi(() => Balloon("Recording failed", error, ToolTipIcon.Error));
+
+        indicator = new RecordingIndicator();
+
+        hotkeys = new HotkeyWindow();
+        hotkeys.HotkeyPressed += _ => SaveReplay();
+        hotkeys.ShowSettingsRequested += () =>
+            Balloon(AppInfo.Name + " is already running", "Right-click the tray icon.", ToolTipIcon.Info);
+        instance.ListenForSignals(hotkeys.Handle);
+
+        bool hotkeyOk = hotkeys.Register(HotkeyId.Save, config.SaveHotkey);
+
+        theme = new SystemTheme();
+        theme.Changed += () => tray!.Icon = TrayIcons.ForTaskbar(theme.LightTaskbar);
+
+        pauseItem = new ToolStripMenuItem("Pause buffering", null, (_, _) => TogglePause());
+
+        tray = new NotifyIcon
+        {
+            Icon = TrayIcons.ForTaskbar(theme.LightTaskbar),
+            Text = AppInfo.Name,
+            Visible = true,
+            ContextMenuStrip = BuildMenu(),
+        };
+        tray.DoubleClick += (_, _) => OpenSaveFolder();
+        tray.BalloonTipClicked += (_, _) => RevealLastSaved();
+
+        // Force handle creation so background threads can marshal onto the UI thread
+        // through it even while the indicator is hidden.
+        _ = indicator.Handle;
+        if (config.ShowIndicator)
+        {
+            indicator.Show();
+        }
+
+        buffer.Start();
+
+        if (!hotkeyOk)
+        {
+            Balloon(
+                "Hotkey unavailable",
+                $"{config.SaveHotkey} is taken by another app. Edit {AppInfo.ConfigPath} to rebind.",
+                ToolTipIcon.Warning);
+        }
+    }
+
+    private ContextMenuStrip BuildMenu()
+    {
+        var menu = new ContextMenuStrip { Renderer = new DarkMenuRenderer() };
+
+        var save = new ToolStripMenuItem("Save replay", null, (_, _) => SaveReplay())
+        {
+            ShortcutKeyDisplayString = config.SaveHotkey.ToString(),
+            Font = Theme.Ui(9f, FontStyle.Bold),
+        };
+
+        menu.Items.Add(save);
+        menu.Items.Add(pauseItem);
+        menu.Items.Add(new ToolStripSeparator());
+
+        menu.Items.Add(Choice("Buffer length", AppConfig.BufferChoices, m => $"{m} minutes",
+            () => config.BufferMinutes, m => config.BufferMinutes = m));
+        menu.Items.Add(Choice("Quality", Enum.GetValues<Quality>(), q => q.ToString(),
+            () => config.Quality, q => { config.Quality = q; buffer.Restart(); }));
+        menu.Items.Add(Choice("Frame rate", AppConfig.FpsChoices, f => $"{f} fps",
+            () => config.Fps, f => { config.Fps = f; buffer.Restart(); }));
+
+        menu.Items.Add(Toggle("System audio", () => config.SystemAudio,
+            v => { config.SystemAudio = v; buffer.Restart(); }));
+        menu.Items.Add(Toggle("Corner indicator", () => config.ShowIndicator, v =>
+        {
+            config.ShowIndicator = v;
+            if (v)
+            {
+                indicator.Show();
+            }
+            else
+            {
+                indicator.Hide();
+            }
+        }));
+
+        var startup = new ToolStripMenuItem("Start with Windows");
+        startup.Click += (_, _) => { StartupRegistry.TrySet(!StartupRegistry.IsEnabled()); };
+        menu.Opening += (_, _) => startup.Checked = StartupRegistry.IsEnabled();
+        menu.Items.Add(startup);
+
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(new ToolStripMenuItem("Open replays folder", null, (_, _) => OpenSaveFolder()));
+        menu.Items.Add(new ToolStripMenuItem("Exit", null, (_, _) => ExitThread()));
+        return menu;
+    }
+
+    /// <summary>A radio-checked submenu bound to one config value; changing it saves the config.</summary>
+    private ToolStripMenuItem Choice<T>(
+        string title, IEnumerable<T> values, Func<T, string> label, Func<T> get, Action<T> set)
+        where T : notnull
+    {
+        var parent = new ToolStripMenuItem(title);
+        foreach (var value in values)
+        {
+            var item = new ToolStripMenuItem(label(value)) { Tag = value };
+            item.Click += (_, _) =>
+            {
+                set(value);
+                config.Save();
+            };
+            parent.DropDownItems.Add(item);
+        }
+
+        parent.DropDownOpening += (_, _) =>
+        {
+            foreach (ToolStripMenuItem item in parent.DropDownItems)
+            {
+                item.Checked = Equals(item.Tag, get());
+            }
+        };
+
+        parent.DropDown.Renderer = new DarkMenuRenderer();
+        return parent;
+    }
+
+    private ToolStripMenuItem Toggle(string title, Func<bool> get, Action<bool> set)
+    {
+        var item = new ToolStripMenuItem(title) { Checked = get() };
+        item.Click += (_, _) =>
+        {
+            set(!get());
+            config.Save();
+            item.Checked = get();
+        };
+        return item;
+    }
+
+    private void SaveReplay()
+    {
+        if (saving)
+        {
+            return;
+        }
+
+        saving = true;
+        Task.Run(() =>
+        {
+            try
+            {
+                var path = buffer.Save();
+                OnUi(() =>
+                {
+                    lastSaved = path;
+                    Balloon("Replay saved", Path.GetFileName(path), ToolTipIcon.None);
+                });
+            }
+            catch (Exception ex)
+            {
+                OnUi(() => Balloon("Save failed", ex.Message, ToolTipIcon.Error));
+            }
+            finally
+            {
+                saving = false;
+            }
+        });
+    }
+
+    private void TogglePause()
+    {
+        if (buffer.Running)
+        {
+            buffer.Stop();
+        }
+        else
+        {
+            buffer.Start();
+        }
+
+        pauseItem.Text = buffer.Running ? "Pause buffering" : "Resume buffering";
+        indicator.Buffering = buffer.Running;
+        tray.Text = buffer.Running ? AppInfo.Name : AppInfo.Name + " — paused";
+    }
+
+    private void OpenSaveFolder()
+    {
+        Directory.CreateDirectory(config.SaveRoot);
+        Process.Start(new ProcessStartInfo(config.SaveRoot) { UseShellExecute = true });
+    }
+
+    private void RevealLastSaved()
+    {
+        if (lastSaved is not null && File.Exists(lastSaved))
+        {
+            Process.Start("explorer.exe", $"/select,\"{lastSaved}\"");
+        }
+    }
+
+    private void Balloon(string title, string text, ToolTipIcon icon) =>
+        tray.ShowBalloonTip(4000, title, text, icon);
+
+    private void OnUi(Action action)
+    {
+        if (indicator.IsHandleCreated)
+        {
+            indicator.BeginInvoke(action);
+        }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            tray.Visible = false;
+            tray.Dispose();
+            buffer.Dispose();
+            hotkeys.Dispose();
+            theme.Dispose();
+            indicator.Dispose();
+        }
+
+        base.Dispose(disposing);
+    }
+}

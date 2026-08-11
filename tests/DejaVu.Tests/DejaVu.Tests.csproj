@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>DejaVu.Tests</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <Platforms>x64</Platforms>
+    <Platform>x64</Platform>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Tests.cs" />
+    <!-- The production sources under test, compiled in directly rather than duplicated. -->
+    <Compile Include="..\..\src\DejaVu\Native.cs" />
+    <Compile Include="..\..\src\DejaVu\HotkeyBinding.cs" />
+    <Compile Include="..\..\src\DejaVu\AppInfo.cs" />
+    <Compile Include="..\..\src\DejaVu\AppConfig.cs" />
+    <Compile Include="..\..\src\DejaVu\ReplayBuffer.cs" />
+    <Compile Include="..\..\src\DejaVu\Mp4Concat.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ScreenRecorderLib" Version="6.6.0" />
+  </ItemGroup>
+
+</Project>
