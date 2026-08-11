@@ -64,6 +64,29 @@ never leaks a private conversation. The excluded apps are configurable as `audio
 in `config.json` (default: Discord, DiscordCanary, DiscordPTB, Vesktop); an empty list
 records the full system mix.
 
+## Why not ShadowPlay or OBS?
+
+Both are good at what DejaVu doesn't do. For the one job of an instant-replay buffer,
+each fails in a way users report constantly:
+
+| | ShadowPlay / NVIDIA App | OBS replay buffer | DejaVu |
+|---|---|---|---|
+| Stays on | Turns itself off silently — per-game, after driver updates, on alt-tab | You must remember to start the buffer every session | Always on from launch and boot; self-heals; the dot says so |
+| Crash | RAM buffer — a crash loses everything | MP4 output corrupts on crash unless you remux MKV | Disk segments survive; next launch saves them automatically |
+| Feedback | Save sometimes silently does nothing | No native "replay saved" toast at all | Balloon on every save; click it to reveal the file |
+| Filenames | Per-game folders | Manual strftime setup or clips overwrite | `eldenring_2026-08-11_224513.mp4`, automatic |
+| Voice privacy | Discord audio lands in the mix | Only with per-app audio sources configured by hand | Discord excluded by default, zero setup |
+| Needs | The NVIDIA App + overlay stack, NVIDIA GPU only | The whole OBS install and a scene collection | One exe, any GPU with a hardware encoder |
+| Buffer lives in | RAM | RAM (capped at 75% of physical) | Bounded disk ring — nothing held in RAM |
+
+The claims about ShadowPlay and OBS reflect their designs and widely-reported user
+complaints; both projects evolve, so verify against current versions.
+
+While buffering, DejaVu's measured working set is ~120 MB at 1440p/30 fps Low and
+~190 MB at 1440p/60 fps High — the encoder pipeline is the cost, and shrinking it is an
+active work item. The app itself is a ~160 KB framework-dependent exe with no services,
+no overlay, and no account.
+
 ## Old PCs are the scope, not an afterthought
 
 DejaVu is built to run on roughly 2015-era machines: one tray exe, ~25 MB of RAM, and
