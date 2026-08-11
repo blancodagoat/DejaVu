@@ -172,4 +172,97 @@ internal static class Native
         var info = new MONITORINFOEX { cbSize = Marshal.SizeOf<MONITORINFOEX>() };
         return monitor != IntPtr.Zero && GetMonitorInfoW(monitor, ref info) ? info.szDevice : null;
     }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromPoint(POINT pt, uint flags);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT
+    {
+        public int X, Y;
+    }
+
+    public static IntPtr PrimaryMonitor() => MonitorFromPoint(default, 1 /* DEFAULTTOPRIMARY */);
+
+    private delegate bool MonitorEnumProc(IntPtr monitor, IntPtr dc, IntPtr rect, IntPtr data);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumDisplayMonitors(IntPtr dc, IntPtr clip, MonitorEnumProc proc, IntPtr data);
+
+    /// <summary>The HMONITOR currently backing a GDI device name, or zero if unplugged.</summary>
+    public static IntPtr MonitorFromDeviceName(string deviceName)
+    {
+        IntPtr found = IntPtr.Zero;
+        EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (monitor, _, _, _) =>
+        {
+            var info = new MONITORINFOEX { cbSize = Marshal.SizeOf<MONITORINFOEX>() };
+            if (GetMonitorInfoW(monitor, ref info)
+                && string.Equals(info.szDevice, deviceName, StringComparison.OrdinalIgnoreCase))
+            {
+                found = monitor;
+                return false;
+            }
+
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
+    /// <summary>Attached displays as (GDI device name, human monitor name).</summary>
+    public static List<(string DeviceName, string FriendlyName)> ListDisplays()
+    {
+        var result = new List<(string, string)>();
+        var adapter = new DISPLAY_DEVICE { cb = (uint)Marshal.SizeOf<DISPLAY_DEVICE>() };
+        for (uint i = 0; EnumDisplayDevicesW(null, i, ref adapter, 0); i++)
+        {
+            const uint AttachedToDesktop = 0x1;
+            if ((adapter.StateFlags & AttachedToDesktop) == 0)
+            {
+                continue;
+            }
+
+            var monitor = new DISPLAY_DEVICE { cb = (uint)Marshal.SizeOf<DISPLAY_DEVICE>() };
+            var friendly = EnumDisplayDevicesW(adapter.DeviceName, 0, ref monitor, 0)
+                ? monitor.DeviceString
+                : adapter.DeviceString;
+            result.Add((adapter.DeviceName, friendly));
+        }
+
+        return result;
+    }
+
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowTextW(IntPtr hWnd, System.Text.StringBuilder text, int maxCount);
+
+    /// <summary>Visible, titled, non-minimised top-level windows for the capture picker.</summary>
+    public static List<(IntPtr Handle, string Title)> ListWindows()
+    {
+        var result = new List<(IntPtr, string)>();
+        var sb = new System.Text.StringBuilder(256);
+        EnumWindows((hwnd, _) =>
+        {
+            if (IsWindowVisible(hwnd) && !IsIconic(hwnd))
+            {
+                sb.Clear();
+                if (GetWindowTextW(hwnd, sb, sb.Capacity) > 0)
+                {
+                    result.Add((hwnd, sb.ToString()));
+                }
+            }
+
+            return true;
+        }, IntPtr.Zero);
+        return result;
+    }
 }

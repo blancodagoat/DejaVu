@@ -218,20 +218,18 @@ if (args.Length > 0 && args[0] == "smoke")
 {
     // A locked or sleeping screen delivers no frames, and every downstream assertion
     // would fail for reasons that have nothing to do with the code. Probe first.
-    using (var probe = ScreenRecorderLib.Recorder.CreateRecorder(new ScreenRecorderLib.RecorderOptions
     {
-        SourceOptions = new ScreenRecorderLib.SourceOptions
-        {
-            RecordingSources = { ScreenRecorderLib.DisplayRecordingSource.MainMonitor },
-        },
-    }))
-    {
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern IntPtr ProbeMonitorFromPoint(System.Drawing.Point pt, uint flags);
         var probePath = Path.Combine(Path.GetTempPath(), "dejavu_probe.mp4");
-        probe.Record(probePath);
-        Thread.Sleep(3000);
-        int frames = probe.CurrentFrameNumber;
-        probe.Stop();
-        Thread.Sleep(1000);
+        int frames;
+        using (var probe = new CaptureEngine(Native.PrimaryMonitor(), IntPtr.Zero, 30, 60))
+        {
+            probe.Start(probePath);
+            Thread.Sleep(2500);
+            frames = probe.FramesInSegment;
+            probe.Stop();
+        }
         File.Delete(probePath);
         if (frames == 0)
         {
@@ -247,7 +245,7 @@ if (args.Length > 0 && args[0] == "smoke")
         SystemAudio = true,
         // Pinned to the primary display: "auto" would depend on wherever the user's
         // focus happens to be while the test runs.
-        CaptureTarget = ScreenRecorderLib.DisplayRecordingSource.MainMonitor.DeviceName,
+        CaptureTarget = Native.ListDisplays().First().DeviceName,
     };
     Directory.CreateDirectory(config.SaveRoot);
 

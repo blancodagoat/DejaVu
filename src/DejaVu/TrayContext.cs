@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using ScreenRecorderLib;
 
 namespace DejaVu;
 
@@ -190,14 +189,14 @@ internal sealed class TrayContext : ApplicationContext
 
         try
         {
-            foreach (var display in Recorder.GetDisplays())
+            foreach (var (device, friendly) in Native.ListDisplays())
             {
-                var device = display.DeviceName;
-                var item = new ToolStripMenuItem($"{display.FriendlyName} ({device})")
+                var deviceName = device;
+                var item = new ToolStripMenuItem($"{friendly} ({device})")
                 {
                     Checked = onDisplays && config.CaptureTarget == device,
                 };
-                item.Click += (_, _) => SetCaptureTarget(device);
+                item.Click += (_, _) => SetCaptureTarget(deviceName);
                 parent.DropDownItems.Add(item);
             }
         }
@@ -208,22 +207,18 @@ internal sealed class TrayContext : ApplicationContext
 
         try
         {
-            var windows = Recorder.GetWindows()
-                .Where(w => w.IsValidWindow() && !w.IsMinmimized() && !string.IsNullOrWhiteSpace(w.Title))
-                .Take(12)
-                .ToList();
-
+            var windows = Native.ListWindows().Take(12).ToList();
             if (windows.Count > 0)
             {
                 parent.DropDownItems.Add(new ToolStripSeparator());
             }
 
-            foreach (var window in windows)
+            foreach (var (handle, title) in windows)
             {
-                var handle = window.Handle;
-                var title = window.Title.Length > 48 ? window.Title[..48] + "…" : window.Title;
-                var item = new ToolStripMenuItem(title) { Checked = buffer.WindowTarget == handle };
-                item.Click += (_, _) => buffer.SetWindowTarget(handle);
+                var hwnd = handle;
+                var label = title.Length > 48 ? title[..48] + "…" : title;
+                var item = new ToolStripMenuItem(label) { Checked = buffer.WindowTarget == hwnd };
+                item.Click += (_, _) => buffer.SetWindowTarget(hwnd);
                 parent.DropDownItems.Add(item);
             }
         }

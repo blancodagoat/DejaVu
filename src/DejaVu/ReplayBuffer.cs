@@ -1,17 +1,16 @@
 using System.Globalization;
-using ScreenRecorderLib;
 
 namespace DejaVu;
 
 /// <summary>
-/// The rolling buffer: the primary display is recorded in fixed-length hardware-encoded
-/// segments in a scratch folder, old segments are pruned as they age out, and "save"
-/// stitches the segments covering the configured window into one MP4 without re-encoding.
+/// The rolling buffer on top of <see cref="CaptureEngine"/>: capture runs continuously
+/// and the engine rotates between fixed-length segment files without stopping, so a seam
+/// costs at most one frame. Old segments are pruned as they age out, and "save" stitches
+/// the segments covering the configured window into one MP4 without re-encoding.
 ///
-/// ponytail: segments run strictly one at a time — ScreenRecorderLib hard-crashes when two
-/// recorders overlap — so each seam drops the finalize+startup latency (~1 s per minute).
-/// The upgrade path is a single recorder writing fragmented MP4 to a ring stream
-/// (VideoEncoderOptions.IsFragmentedMp4Enabled).
+/// ponytail: audio starts alongside the engine rather than on a shared clock, which
+/// lands A/V sync within ~100 ms; frame-accurate alignment would need timestamps from
+/// one clock across both pipelines.
 /// </summary>
 internal sealed class ReplayBuffer : IDisposable
 {
@@ -23,17 +22,18 @@ internal sealed class ReplayBuffer : IDisposable
     private readonly object gate = new();
     private readonly System.Threading.Timer cycleTimer;
 
-    private Recorder? current;
-    private ManualResetEventSlim? currentDone;
+    private CaptureEngine? engine;
+    private IntPtr engineMonitor;
+    private IntPtr engineWindow;
+    private string? currentVideoPath;
+    private string? currentAudioPath;
+    private string? currentSegmentPath;
+    private AudioLoopback? currentAudio;
     private bool running;
     private IntPtr windowTarget;
     private bool sourceFallback;
     private int consecutiveFailures;
     private bool audioWarned;
-
-    // ponytail: audio starts on the recorder's first-frame status change, which lands
-    // A/V sync within ~100 ms; frame-accurate alignment would need timestamps from a
-    // shared clock across both pipelines.
 
 
     public ReplayBuffer(AppConfig config, int segmentSeconds = 60)
@@ -126,17 +126,38 @@ internal sealed class ReplayBuffer : IDisposable
             }
 
             running = true;
-            sourceFallback = false;
             consecutiveFailures = 0;
             audioWarned = false;
-            StartSegment();
+
+            var (monitor, window) = ResolveTarget();
+            try
+            {
+                engine = new CaptureEngine(monitor, window, config.Fps, config.QualityValue);
+            }
+            catch (Exception ex)
+            {
+                running = false;
+                Failed?.Invoke("Capture could not start: " + ex.Message);
+                return;
+            }
+
+            engineMonitor = monitor;
+            engineWindow = window;
+            engine.Error += OnEngineError;
+
+            BeginSegmentPaths();
+            engine.Start(currentVideoPath!);
+            StartAudio();
+            cycleTimer.Change(TimeSpan.FromSeconds(segmentSeconds), TimeSpan.FromSeconds(segmentSeconds));
         }
     }
 
     public void Stop()
     {
-        Recorder? old;
-        ManualResetEventSlim? done;
+        CaptureEngine? old;
+        AudioLoopback? audio;
+        string? vid, aud, seg;
+        int frames;
         lock (gate)
         {
             if (!running)
@@ -146,14 +167,74 @@ internal sealed class ReplayBuffer : IDisposable
 
             running = false;
             cycleTimer.Change(Timeout.Infinite, Timeout.Infinite);
-            old = current;
-            done = currentDone;
-            current = null;
-            currentDone = null;
+            old = engine;
+            engine = null;
+            audio = currentAudio;
+            currentAudio = null;
+            (vid, aud, seg) = (currentVideoPath, currentAudioPath, currentSegmentPath);
+            frames = old?.FramesInSegment ?? 0;
         }
 
-        old?.Stop();
-        done?.Wait(TimeSpan.FromSeconds(10));
+        if (old is null)
+        {
+            return;
+        }
+
+        old.Stop();
+        audio?.Dispose();
+        if (vid is not null)
+        {
+            if (frames > 0)
+            {
+                JoinSegment(vid, aud!, seg!);
+            }
+            else
+            {
+                TryDelete(vid);
+                TryDelete(aud!);
+            }
+        }
+
+        old.Dispose();
+        Prune();
+    }
+
+    /// <summary>Caller must hold <see cref="gate"/>.</summary>
+    private void BeginSegmentPaths()
+    {
+        var stamp = DateTime.Now.ToString(TimeFormat, CultureInfo.InvariantCulture);
+        currentVideoPath = Path.Combine(AppInfo.BufferDirectory, $"vid_{stamp}.mp4");
+        currentAudioPath = Path.Combine(AppInfo.BufferDirectory, $"aud_{stamp}.mp4");
+        currentSegmentPath = Path.Combine(AppInfo.BufferDirectory, $"{SegmentPrefix}{stamp}.mp4");
+    }
+
+    /// <summary>Caller must hold <see cref="gate"/>.</summary>
+    private void StartAudio()
+    {
+        if (!config.SystemAudio)
+        {
+            return;
+        }
+
+        currentAudio = AudioLoopback.TryStart(currentAudioPath!, FindExcludePid());
+        if (currentAudio is null && !audioWarned)
+        {
+            audioWarned = true;
+            Failed?.Invoke("Audio capture failed; replays will be silent.");
+        }
+    }
+
+    private void OnEngineError(string message)
+    {
+        lock (gate)
+        {
+            EscalateFallback(message);
+        }
+
+        if (Running)
+        {
+            Task.Run(Restart);
+        }
     }
 
     /// <summary>Applies changed settings by starting a fresh segment chain. A paused
@@ -298,125 +379,78 @@ internal sealed class ReplayBuffer : IDisposable
 
     private void Cycle()
     {
-        Recorder? old;
+        bool retarget = false;
         lock (gate)
         {
-            if (!running)
+            if (!running || engine is null)
             {
                 return;
             }
 
-            old = current;
+            // Auto mode follows the active window across monitors; a target change means
+            // a fresh engine rather than a rotation. At most one segment of lag.
+            var (monitor, window) = ResolveTarget();
+            if (monitor != engineMonitor || window != engineWindow)
+            {
+                retarget = true;
+            }
+            else
+            {
+                var (vid, aud, seg) = (currentVideoPath!, currentAudioPath!, currentSegmentPath!);
+                var audio = currentAudio;
+                BeginSegmentPaths();
+                engine.Rotate(
+                    currentVideoPath!,
+                    frames => OnSegmentFinalized(vid, aud, seg, audio, frames));
+                currentAudio = null;
+                StartAudio();
+            }
         }
 
-        // The completion handler chains the next segment once this one has finalized.
-        old?.Stop();
+        if (retarget)
+        {
+            Restart();
+        }
     }
 
-    /// <summary>Caller must hold <see cref="gate"/>.</summary>
-    private void StartSegment()
+    /// <summary>
+    /// Runs on a worker thread once the rotated-out segment's writer has finalized. The
+    /// audio chunk records marginally past the video seam; the mux does not mind a tail.
+    /// </summary>
+    private void OnSegmentFinalized(
+        string videoPath, string audioPath, string segmentPath, AudioLoopback? audio, int frames)
     {
-        var stamp = DateTime.Now.ToString(TimeFormat, CultureInfo.InvariantCulture);
-        var videoPath = Path.Combine(AppInfo.BufferDirectory, $"vid_{stamp}.mp4");
-        var audioPath = Path.Combine(AppInfo.BufferDirectory, $"aud_{stamp}.mp4");
-        var segmentPath = Path.Combine(AppInfo.BufferDirectory, $"{SegmentPrefix}{stamp}.mp4");
+        audio?.Dispose();
 
-        var done = new ManualResetEventSlim(false);
-        var recorder = Recorder.CreateRecorder(BuildOptions());
-        AudioLoopback? audio = null;
-
-        if (config.SystemAudio)
+        // Zero frames across a whole segment means the source silently delivered
+        // nothing — a sleeping or locked screen, or a dead capture source. A static
+        // desktop still yields its initial frames, so this does not misfire when idle.
+        if (frames > 0)
         {
-            // Audio starts when the recorder reports its first frames, so both timelines
-            // begin together (within ~100 ms — see the ponytail note below).
-            recorder.OnStatusChanged += (_, e) =>
-            {
-                if (e.Status == RecorderStatus.Recording && audio is null)
-                {
-                    audio = AudioLoopback.TryStart(audioPath, FindExcludePid());
-                    if (audio is null && !audioWarned)
-                    {
-                        audioWarned = true;
-                        Failed?.Invoke("Audio capture failed; replays will be silent.");
-                    }
-                }
-            };
-        }
-
-        recorder.OnRecordingComplete += (_, _) =>
-        {
-            // Read before dispose. Zero frames across a whole segment means the source
-            // silently delivered nothing (seen with some multi-adapter display setups) —
-            // a static screen still yields its initial frames, so this does not misfire
-            // on an idle desktop.
-            bool healthy = recorder.CurrentFrameNumber > 0;
-
-            // The finished segment must exist before done is signalled, because Save()
-            // waits on it and then lists segment files.
-            audio?.Dispose();
-            if (healthy)
-            {
-                JoinSegment(videoPath, audioPath, segmentPath);
-            }
-
-            done.Set();
-            Prune();
-            Task.Run(recorder.Dispose);
+            JoinSegment(videoPath, audioPath, segmentPath);
             lock (gate)
             {
-                // An empty segment is not fatal: a locked or sleeping screen legitimately
-                // yields no frames, and the chain must keep cycling so recording resumes
-                // the moment the desktop is back. It might also be a dead capture source
-                // (some multi-adapter setups), so future segments switch to the main
-                // display — reported once, never silently.
-                if (!healthy)
-                {
-                    TryDelete(videoPath);
-                    TryDelete(audioPath);
-                    if (!sourceFallback)
-                    {
-                        sourceFallback = true;
-                        Failed?.Invoke("Capture produced no frames; watching the main display until it recovers.");
-                    }
-                }
-                else
-                {
-                    consecutiveFailures = 0;
-                }
-
-                // Chain the next segment, unless Stop() got here first or a newer
-                // recorder already took over.
-                if (running && ReferenceEquals(current, recorder))
-                {
-                    StartSegment();
-                }
+                consecutiveFailures = 0;
             }
-        };
-
-        recorder.OnRecordingFailed += (_, e) =>
+        }
+        else
         {
-            audio?.Dispose();
-            done.Set();
             TryDelete(videoPath);
             TryDelete(audioPath);
-            Task.Run(recorder.Dispose);
             lock (gate)
             {
-                // Self-heal instead of silently stopping: fall back to the main display
-                // and keep the chain alive. Only repeated failure on the fallback source
-                // gives up, and even that is reported.
-                EscalateFallback(e.Error);
-                if (running && ReferenceEquals(current, recorder))
+                // Keep cycling — recording resumes the moment the desktop is back — but
+                // move future capture to the main display in case the source is dead.
+                // Reported once, never silently.
+                if (!sourceFallback)
                 {
-                    StartSegment();
+                    sourceFallback = true;
+                    Failed?.Invoke("Capture produced no frames; watching the main display until it recovers.");
                 }
             }
-        };
+        }
 
-        recorder.Record(videoPath);
-        current = recorder;
-        currentDone = done;
-        cycleTimer.Change(TimeSpan.FromSeconds(segmentSeconds), Timeout.InfiniteTimeSpan);
+        Prune();
     }
 
     /// <summary>
@@ -491,24 +525,22 @@ internal sealed class ReplayBuffer : IDisposable
     }
 
     /// <summary>
-    /// What the next segment records. Resolved per segment, so "auto" follows the active
-    /// window across monitors with at most one segment of lag, and a dead window target
-    /// falls back to the configured display instead of erroring forever.
-    /// ponytail: per-segment granularity means a monitor switch shows up one seam late;
-    /// live source swapping via GetDynamicOptionsBuilder is the upgrade path.
+    /// What the engine records: a window handle, or the monitor resolved from the
+    /// configured target. "auto" is the display hosting the active window; a dead window
+    /// target falls back to the configured display instead of erroring forever.
     /// </summary>
-    private RecordingSourceBase ResolveSource()
+    private (IntPtr Monitor, IntPtr Window) ResolveTarget()
     {
         if (sourceFallback)
         {
-            return DisplayRecordingSource.MainMonitor;
+            return (Native.PrimaryMonitor(), IntPtr.Zero);
         }
 
         if (windowTarget != IntPtr.Zero)
         {
             if (Native.IsWindow(windowTarget))
             {
-                return new WindowRecordingSource(windowTarget);
+                return (IntPtr.Zero, windowTarget);
             }
 
             windowTarget = IntPtr.Zero;
@@ -518,54 +550,9 @@ internal sealed class ReplayBuffer : IDisposable
             ? Native.ForegroundDisplayDevice()
             : config.CaptureTarget;
 
-        try
-        {
-            if (!string.IsNullOrEmpty(device)
-                && Recorder.GetDisplays().Any(d => d.DeviceName == device))
-            {
-                return new DisplayRecordingSource(device);
-            }
-        }
-        catch
-        {
-            // Enumeration hiccup; the main monitor always exists.
-        }
-
-        return DisplayRecordingSource.MainMonitor;
+        var monitor = string.IsNullOrEmpty(device) ? IntPtr.Zero : Native.MonitorFromDeviceName(device);
+        return (monitor != IntPtr.Zero ? monitor : Native.PrimaryMonitor(), IntPtr.Zero);
     }
-
-    private RecorderOptions BuildOptions() => new()
-    {
-        SourceOptions = new SourceOptions
-        {
-            RecordingSources = new List<RecordingSourceBase> { ResolveSource() },
-        },
-        VideoEncoderOptions = new VideoEncoderOptions
-        {
-            Quality = config.QualityValue,
-            Framerate = config.Fps,
-            IsHardwareEncodingEnabled = true,
-            IsLowLatencyEnabled = true,
-            // Fragmented output: a crash or power cut mid-segment still leaves every
-            // finished fragment playable. Save() remuxes to a normal moov MP4.
-            IsFragmentedMp4Enabled = true,
-            Encoder = new H264VideoEncoder
-            {
-                BitrateMode = H264BitrateControlMode.Quality,
-                EncoderProfile = H264Profile.Main,
-            },
-        },
-        // Audio is captured by AudioLoopback (which can keep Discord out of the mix) and
-        // muxed in per segment; the recorder itself always writes silent video.
-        AudioOptions = new AudioOptions
-        {
-            IsAudioEnabled = false,
-        },
-        MouseOptions = new MouseOptions
-        {
-            IsMousePointerEnabled = true,
-        },
-    };
 
     /// <summary>
     /// Caller must hold <see cref="gate"/>. Hard recorder errors: first strike swaps
