@@ -67,7 +67,7 @@ That's it. There is no window, no scenes, no setup. The tray menu has every sett
 
 <sub>Based on each tool's design and widely-reported user complaints; both evolve, verify against current versions.</sub>
 
-**Honest numbers:** while buffering 1440p, DejaVu's working set measures ~120 MB (Low/30) to ~190 MB (High/60) — the encoder pipeline is the cost, and shrinking it is an active work item. Paused, it's a tray icon. No overlay, no services, no FPS tax from an in-game UI.
+**Honest numbers:** while buffering 1440p60 at High, DejaVu's measured working set is ~135 MB — mostly the hardware encoder's own working space — and shrinking it further is an active work item. Paused, it's a tray icon. No overlay, no services, no FPS tax from an in-game UI. And on modern GPUs (RTX 40+, RX 7000+, Arc) it records **AV1**: same quality, roughly a third smaller files, falling back to H.264 automatically everywhere else.
 
 ---
 
@@ -76,7 +76,8 @@ That's it. There is no window, no scenes, no setup. The tray menu has every sett
 
 <br>
 
-- **Segment ring** — the screen is recorded in 1-minute hardware-encoded H.264 segments (NVENC / AMF / QuickSync, near-zero CPU) as **fragmented MP4**: kill the power mid-write and the file still plays. Old segments delete themselves, so disk use stays flat (~300 MB–1 GB total, by settings).
+- **Own capture engine** — Windows.Graphics.Capture frames go straight into a Media Foundation hardware encoder (AV1 where the GPU can, else H.264; NVENC / AMF / QuickSync, near-zero CPU). Frames never leave the GPU, and there are no third-party components at all.
+- **Segment ring** — capture never stops; the encoder rotates between 1-minute **fragmented MP4** segment files, so a seam costs at most one frame and killing the power mid-write still leaves playable files. Old segments delete themselves, so disk use stays flat.
 - **Save** — the segments covering your window are stitched into one standard MP4: a lossless remux, no re-encode, done in about a second.
 - **Crash recovery** — segments on disk at launch mean the last session died; they're auto-stitched into `recovered_*.mp4` and you get a balloon.
 - **Self-healing capture** — a source that delivers zero frames gets dropped for the main display; a sleeping or locked screen just idles until you're back. It only ever stops after repeated hard failures, and it says so.
