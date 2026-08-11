@@ -145,6 +145,22 @@ internal sealed class TrayContext : ApplicationContext
         menu.Opening += (_, _) => startup.Checked = StartupRegistry.IsEnabled();
         menu.Items.Add(startup);
 
+        // Hotkeys are not delivered while an elevated window has focus; running elevated
+        // ourselves is the only bypass Windows allows.
+        if (!Elevation.IsElevated)
+        {
+            menu.Items.Add(new ToolStripMenuItem("Restart as administrator", null, (_, _) =>
+            {
+                if (Elevation.TryRestartElevated())
+                {
+                    ExitThread();
+                }
+            })
+            {
+                ToolTipText = "Needed for the save hotkey to work while an admin app or game has focus.",
+            });
+        }
+
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Open replays folder", null, (_, _) => OpenSaveFolder()));
         menu.Items.Add(new ToolStripMenuItem("Exit", null, (_, _) => ExitThread()));
