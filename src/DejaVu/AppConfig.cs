@@ -20,6 +20,8 @@ internal sealed class ConfigFile
     public string? SaveRoot { get; set; }
     public bool? ShowIndicator { get; set; }
     public bool? SystemAudio { get; set; }
+    public int? ClipCapGB { get; set; }
+    public string? CaptureTarget { get; set; }
 }
 
 [JsonSourceGenerationOptions(WriteIndented = true, PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
@@ -32,6 +34,7 @@ internal sealed class AppConfig
 {
     public static readonly int[] BufferChoices = [5, 10, 15, 20, 25];
     public static readonly int[] FpsChoices = [30, 60];
+    public static readonly int[] ClipCapChoices = [0, 10, 25, 50];
 
     public int BufferMinutes { get; set; } = 5;
 
@@ -47,12 +50,26 @@ internal sealed class AppConfig
 
     public bool SystemAudio { get; set; } = true;
 
-    /// <summary>Encoder bitrate in bits/second. Flat per preset; the encoder spends it as needed.</summary>
-    public int Bitrate => Quality switch
+    /// <summary>Rolling cap on the saved-clips folder in GB; 0 means never delete.</summary>
+    public int ClipCapGB { get; set; }
+
+    /// <summary>"auto" follows the display of the active window; otherwise a GDI device
+    /// name such as \\.\DISPLAY2 pins one monitor.</summary>
+    public string CaptureTarget { get; set; } = "auto";
+
+    /// <summary>True when no config existed on disk — the app's very first launch.</summary>
+    public bool FirstRun { get; private set; }
+
+    /// <summary>
+    /// Constant-quality target (1–100) for the encoder's quality rate-control mode.
+    /// Unlike a fixed bitrate this spends bits on action and almost nothing on static
+    /// frames, which is what clip recording wants.
+    /// </summary>
+    public int QualityValue => Quality switch
     {
-        Quality.Low => 8_000_000,
-        Quality.Medium => 15_000_000,
-        _ => 25_000_000,
+        Quality.Low => 50,
+        Quality.Medium => 70,
+        _ => 85,
     };
 
     /// <summary>
@@ -66,7 +83,8 @@ internal sealed class AppConfig
 
         try
         {
-            if (File.Exists(AppInfo.ConfigPath))
+            config.FirstRun = !File.Exists(AppInfo.ConfigPath);
+            if (!config.FirstRun)
             {
                 var json = File.ReadAllText(AppInfo.ConfigPath);
                 var file = JsonSerializer.Deserialize(json, ConfigJsonContext.Default.ConfigFile);
@@ -121,7 +139,11 @@ internal sealed class AppConfig
 
                     config.ShowIndicator = file.ShowIndicator ?? true;
                     config.SystemAudio = file.SystemAudio ?? true;
-                    rewrite |= file.ShowIndicator is null || file.SystemAudio is null;
+                    config.ClipCapGB = Math.Max(0, file.ClipCapGB ?? 0);
+                    config.CaptureTarget = string.IsNullOrWhiteSpace(file.CaptureTarget)
+                        ? "auto" : file.CaptureTarget;
+                    rewrite |= file.ShowIndicator is null || file.SystemAudio is null
+                        || file.ClipCapGB is null || file.CaptureTarget is null;
                 }
             }
         }
@@ -152,6 +174,8 @@ internal sealed class AppConfig
                 SaveRoot = SaveRoot,
                 ShowIndicator = ShowIndicator,
                 SystemAudio = SystemAudio,
+                ClipCapGB = ClipCapGB,
+                CaptureTarget = CaptureTarget,
             };
 
             File.WriteAllText(

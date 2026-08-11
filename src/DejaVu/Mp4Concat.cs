@@ -14,6 +14,39 @@ internal static class Mp4Concat
     {
         EnsureStarted();
 
+        // Every readable input is opened before the sink writer exists, and unreadable
+        // ones (still locked by a dying recorder, truncated by a crash) are skipped
+        // rather than fatal. A writer is only created once there is something to write,
+        // so no failed attempt ever leaves a half-open output file behind.
+        var readers = new List<IMFSourceReader>();
+        foreach (var input in inputs)
+        {
+            if (MFCreateSourceReaderFromURL(input, IntPtr.Zero, out var candidate) >= 0)
+            {
+                readers.Add(candidate);
+            }
+        }
+
+        if (readers.Count == 0)
+        {
+            throw new InvalidOperationException("None of the buffered segments are readable.");
+        }
+
+        try
+        {
+            WriteAll(readers, output);
+        }
+        finally
+        {
+            foreach (var reader in readers)
+            {
+                Marshal.ReleaseComObject(reader);
+            }
+        }
+    }
+
+    private static void WriteAll(List<IMFSourceReader> readers, string output)
+    {
         Check(MFCreateSinkWriterFromURL(output, IntPtr.Zero, IntPtr.Zero, out var writer));
         try
         {
@@ -24,10 +57,8 @@ internal static class Mp4Concat
             bool began = false;
             long offset = 0;
 
-            foreach (var input in inputs)
+            foreach (var reader in readers)
             {
-                Check(MFCreateSourceReaderFromURL(input, IntPtr.Zero, out var reader));
-                try
                 {
                     Check(reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, true));
 
@@ -113,10 +144,6 @@ internal static class Mp4Concat
                     }
 
                     offset += fileEnd;
-                }
-                finally
-                {
-                    Marshal.ReleaseComObject(reader);
                 }
             }
 

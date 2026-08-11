@@ -59,31 +59,97 @@ Eq("selection is oldest-first",
 Eq("empty buffer selects nothing",
     ReplayBuffer.SelectSegments([], now, TimeSpan.FromMinutes(5), 60).Count, 0);
 
+// Clip naming
+Eq("exe name sanitised", SourceApp.Sanitise("Overwatch 2.exe"), "overwatch-2");
+Eq("path stripped", SourceApp.Sanitise(@"C:\Games\RocketLeague.exe"), "rocketleague");
+Eq("empty name falls back", SourceApp.Sanitise("  "), SourceApp.Unknown);
+
+// Folder cap: newest clips are kept, oldest past the cap are doomed, oldest first
+var gb = 1L << 30;
+var clips = new (string Path, long Size, DateTime Written)[]
+{
+    ("old1", gb, now.AddDays(-3)),
+    ("old2", gb, now.AddDays(-2)),
+    ("new1", gb, now.AddDays(-1)),
+    ("new2", gb, now),
+};
+Eq("cap keeps newest within budget",
+    string.Join(",", ReplayBuffer.SelectClipsOverCap(clips, 2 * gb)), "old1,old2");
+Eq("cap off-by-nothing at exact fit",
+    ReplayBuffer.SelectClipsOverCap(clips, 4 * gb).Count, 0);
+Eq("oversized single clip survives alone",
+    ReplayBuffer.SelectClipsOverCap([("only", 3 * gb, now)], gb).Count, 0);
+
 // Live smoke: real capture, real concat.
 if (args.Length > 0 && args[0] == "smoke")
 {
+    // A locked or sleeping screen delivers no frames, and every downstream assertion
+    // would fail for reasons that have nothing to do with the code. Probe first.
+    using (var probe = ScreenRecorderLib.Recorder.CreateRecorder(new ScreenRecorderLib.RecorderOptions
+    {
+        SourceOptions = new ScreenRecorderLib.SourceOptions
+        {
+            RecordingSources = { ScreenRecorderLib.DisplayRecordingSource.MainMonitor },
+        },
+    }))
+    {
+        var probePath = Path.Combine(Path.GetTempPath(), "dejavu_probe.mp4");
+        probe.Record(probePath);
+        Thread.Sleep(3000);
+        int frames = probe.CurrentFrameNumber;
+        probe.Stop();
+        Thread.Sleep(1000);
+        File.Delete(probePath);
+        if (frames == 0)
+        {
+            Console.WriteLine("SKIP smoke: the desktop is not delivering frames (screen locked or asleep).");
+            Console.WriteLine($"{passed} passed, {failed} failed");
+            return failed == 0 ? 0 : 1;
+        }
+    }
+
     var config = new AppConfig
     {
         SaveRoot = Path.Combine(Path.GetTempPath(), "DejaVu.SmokeTest"),
         SystemAudio = true,
+        // Pinned to the primary display: "auto" would depend on wherever the user's
+        // focus happens to be while the test runs.
+        CaptureTarget = ScreenRecorderLib.DisplayRecordingSource.MainMonitor.DeviceName,
     };
     Directory.CreateDirectory(config.SaveRoot);
 
     string? recordError = null;
+
+    // Phase 1: buffer for a while, then vanish without cleanup — a simulated crash.
+    // Stop() finalizes segments but only Dispose() clears the buffer directory.
+    var crashed = new ReplayBuffer(config, segmentSeconds: 4);
+    crashed.Failed += e => recordError = e;
+    crashed.RecoverCrashedSession();  // clean slate from any earlier smoke run
+    crashed.Start();
+    Thread.Sleep(10_000);
+    crashed.Stop();
+    Check("no recorder failures", recordError is null, recordError);
+    var crashLeftovers = Directory.GetFiles(AppInfo.BufferDirectory, "seg_*.mp4");
+    Check("crash left segments behind", crashLeftovers.Length >= 2, $"got {crashLeftovers.Length}");
+
+    // Phase 2: next launch recovers the crashed session into a clip.
     using (var buffer = new ReplayBuffer(config, segmentSeconds: 4))
     {
-        buffer.Failed += e => recordError = e;
+        var recovered = buffer.RecoverCrashedSession();
+        Check("crashed session recovered", recovered is not null && File.Exists(recovered));
+        Check("buffer empty after recovery",
+            Directory.GetFiles(AppInfo.BufferDirectory, "seg_*.mp4").Length == 0);
+
+        // Phase 3: normal buffering and a hotkey save through the concat path.
         buffer.Start();
         Thread.Sleep(10_000);
-
-        Check("no recorder failures", recordError is null, recordError);
-
         var segFiles = Directory.GetFiles(AppInfo.BufferDirectory, "seg_*.mp4");
         Check("multiple segments on disk", segFiles.Length >= 2, $"got {segFiles.Length}");
         long largest = segFiles.Length == 0 ? 0 : segFiles.Max(f => new FileInfo(f).Length);
 
-        var output = buffer.Save();
+        var output = buffer.Save("smoketest");
         Check("replay file exists", File.Exists(output));
+        Check("replay named for the app", Path.GetFileName(output).StartsWith("smoketest_"));
         Check("replay merges more than one segment",
             new FileInfo(output).Length > largest, $"{new FileInfo(output).Length} <= {largest}");
         Console.WriteLine($"smoke replay: {output} ({new FileInfo(output).Length / 1024} KB)");

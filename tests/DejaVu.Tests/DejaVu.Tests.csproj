@@ -22,6 +22,7 @@
     <Compile Include="..\..\src\DejaVu\AppInfo.cs" />
     <Compile Include="..\..\src\DejaVu\AppConfig.cs" />
     <Compile Include="..\..\src\DejaVu\ReplayBuffer.cs" />
+    <Compile Include="..\..\src\DejaVu\SourceApp.cs" />
     <Compile Include="..\..\src\DejaVu\Mp4Concat.cs" />
   </ItemGroup>
 
