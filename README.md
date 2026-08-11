@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/logo.png" width="96" alt="">
+
 # DejaVu
 
 ### Your last 5–25 minutes, always recorded. One key saves it.
