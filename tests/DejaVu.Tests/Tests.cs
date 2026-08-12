@@ -23,6 +23,137 @@ void Check(string name, bool ok, string? detail = null)
 void Eq(string name, object? actual, object? expected) =>
     Check(name, Equals(actual, expected), $"expected <{expected}>, got <{actual}>");
 
+// Shared by the live modes. Save root away from the user's real Videos folder; capture
+// pinned to the first display so results do not depend on where focus happens to be.
+AppConfig SoakConfig() => new()
+{
+    SaveRoot = Path.Combine(Path.GetTempPath(), "DejaVu.Soak"),
+    SystemAudio = true,
+    CaptureTarget = Native.ListDisplays().First().DeviceName,
+};
+
+// A locked or sleeping screen delivers no frames, and every downstream assertion would
+// fail for reasons that have nothing to do with the code. Live modes probe first.
+bool DesktopDeliversFrames()
+{
+    var probePath = Path.Combine(Path.GetTempPath(), "dejavu_probe.mp4");
+    int frames;
+    using (var probe = new CaptureEngine(Native.PrimaryMonitor(), IntPtr.Zero, 30, 60))
+    {
+        probe.Start(probePath);
+        Thread.Sleep(2500);
+        frames = probe.FramesInSegment;
+        probe.Stop();
+    }
+
+    File.Delete(probePath);
+    return frames > 0;
+}
+
+// Soak recorder victim: buffers until killed from outside. Spawned by "soak", below.
+if (args.Length > 0 && args[0] == "soakrecord")
+{
+    var recConfig = SoakConfig();
+    Directory.CreateDirectory(recConfig.SaveRoot);
+    var rec = new ReplayBuffer(recConfig, segmentSeconds: 4);
+    rec.Start();
+    Console.WriteLine("      soakrecord: buffering until killed");
+    Thread.Sleep(Timeout.Infinite);
+}
+
+// Crash-kill soak: N cycles of record in a child process -> hard-kill mid-write at a
+// random moment -> recover -> decode-probe the recovered clip. This is the automated
+// version of "killing the power mid-write still leaves playable files" (minus the OS
+// write cache, which software cannot drop). Usage: -- soak [cycles], default 12;
+// "soak 500" is an overnight run.
+if (args.Length > 0 && args[0] == "soak")
+{
+    int cycles = args.Length > 1 && int.TryParse(args[1], out var n) ? n : 12;
+
+    // The buffer directory is shared with a real DejaVu install. Anything already in it
+    // is a real crashed session's buffer; soaking here would eat the user's clip.
+    if (Directory.Exists(AppInfo.BufferDirectory) &&
+        Directory.EnumerateFiles(AppInfo.BufferDirectory).Any())
+    {
+        Console.WriteLine("REFUSING soak: the buffer directory is not empty — launch DejaVu once to recover it first.");
+        return 2;
+    }
+
+    if (!DesktopDeliversFrames())
+    {
+        Console.WriteLine("SKIP soak: the desktop is not delivering frames (screen locked or asleep).");
+        Console.WriteLine($"{passed} passed, {failed} failed");
+        return failed == 0 ? 0 : 1;
+    }
+
+    var soakConfig = SoakConfig();
+    Directory.CreateDirectory(soakConfig.SaveRoot);
+    int seed = Environment.TickCount;
+    var rand = new Random(seed);
+    Console.WriteLine($"soak: {cycles} cycles, seed {seed}");
+
+    for (int i = 0; i < cycles; i++)
+    {
+        // First cycle kills a near-empty buffer; one late cycle runs long enough for
+        // many segment rotations; the rest land anywhere, including mid-rotation.
+        int ms = i == 0 ? 3_000
+            : cycles >= 6 && i == cycles - 1 ? 120_000
+            : rand.Next(6_000, 40_000);
+
+        var child = System.Diagnostics.Process.Start(Environment.ProcessPath!, "soakrecord");
+        try
+        {
+            Thread.Sleep(ms);
+        }
+        finally
+        {
+            child.Kill();
+            child.WaitForExit();
+        }
+
+        int leftovers = Directory.GetFiles(AppInfo.BufferDirectory, "*.mp4").Length;
+        Check($"cycle {i + 1} left files to recover", leftovers > 0, "the child never wrote anything");
+
+        string? clip;
+        bool timedOut;
+        using (var recovery = new ReplayBuffer(soakConfig, segmentSeconds: 4))
+        {
+            (clip, timedOut) = recovery.RecoverWithTimeout(TimeSpan.FromSeconds(90));
+            Check($"cycle {i + 1} recovered a clip (killed at {ms / 1000.0:F0}s, {leftovers} files)",
+                clip is not null && !timedOut && File.Exists(clip),
+                timedOut ? "recovery timed out" : "no clip produced");
+            Check($"cycle {i + 1} buffer clean after recovery",
+                Directory.GetFiles(AppInfo.BufferDirectory, "seg_*.mp4").Length == 0);
+        }
+
+        if (clip is not null && File.Exists(clip))
+        {
+            try
+            {
+                // Full decode, head to tail: the truncated in-flight segment is stitched
+                // LAST, so a broken tail is the likeliest failure and a 10-sample head
+                // probe would never see it. The assertion is on DURATION, not frame
+                // count — WGC delivers frames only when pixels change, so an idle
+                // desktop legitimately yields ~2 fps. The floor allows ~2 s of encoder
+                // cold start plus the unflushed tail of the in-flight fragment.
+                var (frames, luma, duration) = Mf.ProbeVideo(clip, maxSamples: 500_000);
+                double floorSec = Math.Max(0.5, ms / 1000.0 - 6);
+                Check($"cycle {i + 1} clip covers the window to the tail", duration.TotalSeconds >= floorSec,
+                    $"{duration.TotalSeconds:F1}s decoded of a {ms / 1000.0:F1}s buffer, floor {floorSec:F1}s");
+                Console.WriteLine(
+                    $"      cycle {i + 1}: killed at {ms / 1000.0:F1}s, {leftovers} files -> " +
+                    $"{new FileInfo(clip).Length / 1024} KB, {duration.TotalSeconds:F1}s, {frames} frames, luma {luma:F1}");
+            }
+            catch (Exception ex)
+            {
+                Check($"cycle {i + 1} clip covers the window to the tail", false, ex.Message);
+            }
+
+            File.Delete(clip);
+        }
+    }
+}
+
 // HotkeyBinding
 Eq("default save renders", HotkeyBinding.DefaultSave.ToString(), "Alt+F10");
 Check("default save parses back",
@@ -100,6 +231,24 @@ Eq("oversized single clip survives alone",
         UpdateCheck.ParseNewest("""[{"tag_name":"v1.0.0","prerelease":false,"html_url":"x"}]""", new Version(1, 0, 0, 0)) is null);
 }
 
+// Issue reporting: the prefilled new-issue URL must scrub identity and stay under
+// GitHub's URL limit no matter how large the log tail is.
+{
+    var url = IssueReport.BuildUrl(
+        "Recording failed", "v1.0 · Windows 10.0.26200 · AV1 hw: no",
+        @"2026-08-12 saved C:\Users\casey\Videos\DejaVu\clip.mp4", @"C:\Users\casey", "casey");
+    Check("issue url targets the repo", url.StartsWith(AppInfo.GitHubUrl + "/issues/new?title="));
+    Check("issue url carries the log", url.Contains(Uri.EscapeDataString("clip.mp4")));
+    Check("issue url leaks no username", !url.Contains("casey", StringComparison.OrdinalIgnoreCase));
+
+    Eq("scrub folds profile path first",
+        IssueReport.Scrub(@"C:\Users\casey\x and casey again", @"C:\Users\casey", "casey"),
+        "~\\x and <user> again");
+
+    var huge = IssueReport.BuildUrl("t", "e", new string('x', 100_000), @"C:\Users\casey", "casey");
+    Check("huge log tail stays under GitHub's URL limit", huge.Length < 8_000, $"{huge.Length} chars");
+}
+
 // Inspect: decode-probe arbitrary files. Usage: -- inspect <file> [<file>...]
 if (args.Length > 1 && args[0] == "inspect")
 {
@@ -107,8 +256,8 @@ if (args.Length > 1 && args[0] == "inspect")
     {
         try
         {
-            var (frames, luma) = Mf.ProbeVideo(file);
-            Console.WriteLine($"{Path.GetFileName(file)}: decoded {frames} frames, mean luma {luma:F1} ({new FileInfo(file).Length / 1024} KB)");
+            var (frames, luma, duration) = Mf.ProbeVideo(file, maxSamples: 500_000);
+            Console.WriteLine($"{Path.GetFileName(file)}: decoded {frames} frames over {duration.TotalSeconds:F1}s, mean luma {luma:F1} ({new FileInfo(file).Length / 1024} KB)");
         }
         catch (Exception ex)
         {
@@ -125,7 +274,7 @@ if (args.Length == 4 && args[0] == "mux")
     try
     {
         Mp4Concat.MuxParallel(args[1], args[2], args[3]);
-        var (muxFrames, muxLuma) = Mf.ProbeVideo(args[3]);
+        var (muxFrames, muxLuma, _) = Mf.ProbeVideo(args[3]);
         Console.WriteLine($"mux ok: {new FileInfo(args[3]).Length / 1024} KB, decoded {muxFrames} frames, luma {muxLuma:F1}");
     }
     catch (Exception ex)
@@ -273,25 +422,11 @@ if (args.Length > 0 && args[0] is "smoke" or "audio")
 // Live smoke: real capture, real concat.
 if (args.Length > 0 && args[0] == "smoke")
 {
-    // A locked or sleeping screen delivers no frames, and every downstream assertion
-    // would fail for reasons that have nothing to do with the code. Probe first.
+    if (!DesktopDeliversFrames())
     {
-        var probePath = Path.Combine(Path.GetTempPath(), "dejavu_probe.mp4");
-        int frames;
-        using (var probe = new CaptureEngine(Native.PrimaryMonitor(), IntPtr.Zero, 30, 60))
-        {
-            probe.Start(probePath);
-            Thread.Sleep(2500);
-            frames = probe.FramesInSegment;
-            probe.Stop();
-        }
-        File.Delete(probePath);
-        if (frames == 0)
-        {
-            Console.WriteLine("SKIP smoke: the desktop is not delivering frames (screen locked or asleep).");
-            Console.WriteLine($"{passed} passed, {failed} failed");
-            return failed == 0 ? 0 : 1;
-        }
+        Console.WriteLine("SKIP smoke: the desktop is not delivering frames (screen locked or asleep).");
+        Console.WriteLine($"{passed} passed, {failed} failed");
+        return failed == 0 ? 0 : 1;
     }
 
     var config = new AppConfig

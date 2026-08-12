@@ -16,13 +16,14 @@ internal sealed class TrayContext : ApplicationContext
     private HotkeyDialog? hotkeyDialog;
 
     private string? lastSaved;
+    private string? pendingReport;
     private bool saving;
 
     public TrayContext(SingleInstance instance)
     {
         config = AppConfig.Load();
         buffer = new ReplayBuffer(config);
-        buffer.Failed += error => OnUi(() => Balloon("Recording failed", error, ToolTipIcon.Error));
+        buffer.Failed += error => OnUi(() => FailureBalloon("Recording failed", error, ToolTipIcon.Error));
 
         indicator = new RecordingIndicator();
 
@@ -47,7 +48,18 @@ internal sealed class TrayContext : ApplicationContext
             ContextMenuStrip = BuildMenu(),
         };
         tray.DoubleClick += (_, _) => OpenSaveFolder();
-        tray.BalloonTipClicked += (_, _) => RevealLastSaved();
+        tray.BalloonTipClicked += (_, _) =>
+        {
+            if (pendingReport is { } report)
+            {
+                pendingReport = null;
+                IssueReport.Open(report);
+            }
+            else
+            {
+                RevealLastSaved();
+            }
+        };
 
         // Force handle creation so background threads can marshal onto the UI thread
         // through it even while the indicator is hidden.
@@ -87,7 +99,7 @@ internal sealed class TrayContext : ApplicationContext
             }
             else if (timedOut)
             {
-                OnUi(() => Balloon(
+                OnUi(() => FailureBalloon(
                     "Recovery skipped",
                     "Last session's buffer could not be read; its files were parked in the buffer-quarantine folder.",
                     ToolTipIcon.Warning));
@@ -391,7 +403,7 @@ internal sealed class TrayContext : ApplicationContext
             catch (Exception ex)
             {
                 AppLog.Write("save failed: " + ex.Message);
-                OnUi(() => Balloon("Save failed", ex.Message, ToolTipIcon.Error));
+                OnUi(() => FailureBalloon("Save failed", ex.Message, ToolTipIcon.Error));
             }
             finally
             {
@@ -430,8 +442,23 @@ internal sealed class TrayContext : ApplicationContext
         }
     }
 
-    private void Balloon(string title, string text, ToolTipIcon icon) =>
+    private void Balloon(string title, string text, ToolTipIcon icon)
+    {
+        // Any newer balloon supersedes a pending report, so a click on "Replay saved"
+        // can never open an issue page.
+        pendingReport = null;
         tray.ShowBalloonTip(4000, title, text, icon);
+    }
+
+    /// <summary>
+    /// A failure balloon whose click opens a prefilled GitHub issue in the browser —
+    /// the user reviews and submits it there, or closes the tab; the app sends nothing.
+    /// </summary>
+    private void FailureBalloon(string title, string text, ToolTipIcon icon)
+    {
+        Balloon(title, text + " Click to report this on GitHub.", icon);
+        pendingReport = title;
+    }
 
     private void OnUi(Action action)
     {

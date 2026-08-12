@@ -106,6 +106,7 @@ DejaVu is built for roughly 2015 machines and up:
 
 - The buffer lives in `%LOCALAPPDATA%\DejaVu\buffer` and is wiped on a clean exit. After a crash it becomes your recovered clip instead.
 - Nothing leaves your machine. No uploads, no account, no telemetry. The app never phones home; the update check in the tray menu runs only when you click it.
+- Failure balloons offer "click to report": that click only opens a prefilled GitHub issue in your browser (with the log tail, usernames scrubbed) for you to review and submit — or close. The app itself sends nothing, ever.
 - Pause buffering any time from the tray; the dot turns grey.
 - The mic is never captured, and Discord voices are kept out of the mix by default.
 
@@ -135,6 +136,9 @@ Config keys: `bufferMinutes` (5 to 25) · `quality` · `fps` · `saveHotkey` · 
 dotnet build src/DejaVu/DejaVu.csproj
 dotnet run --project tests/DejaVu.Tests            # unit tests
 dotnet run --project tests/DejaVu.Tests -- smoke   # + live capture / crash-recovery / audio-exclusion proof
+dotnet run --project tests/DejaVu.Tests -- soak 12 # crash-kill soak: hard-kills a recording process at
+                                                   # random moments, then proves every recovered clip
+                                                   # decodes head to tail ("soak 500" = overnight run)
 ```
 
 The smoke test records the real screen and plays a test tone to prove exclusion strips it from the captured mix. It skips itself if the screen is locked or asleep, since a sleeping desktop delivers no frames.
