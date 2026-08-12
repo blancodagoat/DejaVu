@@ -25,6 +25,11 @@ internal static class Elevation
             {
                 UseShellExecute = true,
                 Verb = "runas",
+                // The new instance waits for this pid before taking the single-instance
+                // mutex: shutdown finalizes the in-flight segment, which takes seconds,
+                // and losing that race made "Restart as administrator" quietly leave
+                // nothing running.
+                Arguments = "--takeover " + Environment.ProcessId,
             });
             return true;
         }
