@@ -243,7 +243,30 @@ internal sealed class ReplayBuffer : IDisposable
         }
     }
 
-    public void Start()
+    /// <summary>
+    /// Media Foundation's sink writer, sample allocator and DXGI device manager do not
+    /// aggregate the free-threaded marshaler: an RCW created in one COM apartment dies
+    /// with E_NOINTERFACE or "separated from its underlying RCW" the moment another
+    /// apartment touches it (deterministic repro: the tests' "apartment" mode). Tray
+    /// menu clicks arrive on the STA UI thread, so every engine-touching operation
+    /// re-routes itself onto an MTA pool thread. Synchronous on purpose — callers read
+    /// state (Running, saved path) right after.
+    /// </summary>
+    private static void OnMta(Action work)
+    {
+        if (Thread.CurrentThread.GetApartmentState() == ApartmentState.STA)
+        {
+            Task.Run(work).GetAwaiter().GetResult();
+        }
+        else
+        {
+            work();
+        }
+    }
+
+    public void Start() => OnMta(StartCore);
+
+    private void StartCore()
     {
         lock (gate)
         {
@@ -305,7 +328,9 @@ internal sealed class ReplayBuffer : IDisposable
         Stop();
     }
 
-    public void Stop()
+    public void Stop() => OnMta(StopCore);
+
+    private void StopCore()
     {
         CaptureEngine? old;
         AudioLoopback? audio;
@@ -333,7 +358,18 @@ internal sealed class ReplayBuffer : IDisposable
             return;
         }
 
-        old.Stop();
+        try
+        {
+            old.Stop();
+        }
+        catch (Exception ex)
+        {
+            // Finalizing a corrupted writer throws; letting it escape here skipped the
+            // audio disposal below and leaked a live loopback that kept writing for
+            // minutes after its engine died (seen in the field).
+            AppLog.Write("engine stop failed: " + ex);
+        }
+
         audio?.Dispose();
         if (vid is not null)
         {
@@ -758,9 +794,22 @@ internal sealed class ReplayBuffer : IDisposable
                 var (vid, aud, seg) = (currentVideoPath!, currentAudioPath!, currentSegmentPath!);
                 var audio = currentAudio;
                 BeginSegmentPaths();
-                engine.Rotate(
-                    currentVideoPath!,
-                    frames => OnSegmentFinalized(vid, aud, seg, audio, frames));
+                try
+                {
+                    engine.Rotate(
+                        currentVideoPath!,
+                        frames => OnSegmentFinalized(vid, aud, seg, audio, frames));
+                }
+                catch (Exception ex)
+                {
+                    // A writer that cannot be created mid-rotation is an engine death,
+                    // not a process death: route it into the restart machinery instead
+                    // of the unhandled-exception dialog.
+                    AppLog.Write("rotate failed: " + ex);
+                    Task.Run(() => OnEngineError("rotate: " + ex.Message));
+                    return;
+                }
+
                 currentAudio = null;
                 rotated = true;
             }

@@ -37,6 +37,7 @@ internal static class Program
             return;
         }
 
+        AppLog.Write("unhandled: " + ex);
         MessageBox.Show(
             ex.Message, $"{AppInfo.Name} error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
