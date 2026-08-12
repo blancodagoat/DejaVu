@@ -18,6 +18,7 @@ jobs:
     steps:
       - name: Submit version update to winget-pkgs
         run: |
+          if (-not "${{ secrets.WINGET_TOKEN }}") { Write-Host "WINGET_TOKEN secret not set; skipping submission."; exit 0 }
           $tag = "${{ github.event.release.tag_name }}"
           $version = $tag.TrimStart("v")
           Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
