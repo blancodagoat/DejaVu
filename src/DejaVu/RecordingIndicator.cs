@@ -94,6 +94,17 @@ internal sealed class RecordingIndicator : Form
     /// effectively invisible.</summary>
     private int Scale(int value) => value * DeviceDpi / 96;
 
+    /// <summary>Fullscreen games reassert their own topmost above the dot; nudge it
+    /// back up the band. Cheap enough to run on the tray's status pulse.</summary>
+    public void ReassertTopmost()
+    {
+        if (IsHandleCreated && Visible)
+        {
+            Native.SetWindowPos(Handle, Native.HWND_TOPMOST, 0, 0, 0, 0,
+                Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
+        }
+    }
+
     private void Relayout()
     {
         int size = Scale(useIcon ? IconSize : Diameter);

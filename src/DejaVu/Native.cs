@@ -198,9 +198,11 @@ internal static class Native
     }
 
     /// <summary>GDI device name (\\.\DISPLAY1) of the monitor hosting the foreground window.</summary>
-    public static string? ForegroundDisplayDevice()
+    public static string? ForegroundDisplayDevice() => WindowDisplayDevice(GetForegroundWindow());
+
+    /// <summary>GDI device name of the monitor hosting a window; null for no window.</summary>
+    public static string? WindowDisplayDevice(IntPtr hwnd)
     {
-        var hwnd = GetForegroundWindow();
         if (hwnd == IntPtr.Zero)
         {
             return null;
@@ -210,6 +212,15 @@ internal static class Native
         var info = new MONITORINFOEX { cbSize = Marshal.SizeOf<MONITORINFOEX>() };
         return monitor != IntPtr.Zero && GetMonitorInfoW(monitor, ref info) ? info.szDevice : null;
     }
+
+    public static readonly IntPtr HWND_TOPMOST = new(-1);
+    public const uint SWP_NOSIZE = 0x0001;
+    public const uint SWP_NOMOVE = 0x0002;
+    public const uint SWP_NOACTIVATE = 0x0010;
+
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(
+        IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
 
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromPoint(POINT pt, uint flags);
