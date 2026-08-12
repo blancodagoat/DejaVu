@@ -352,7 +352,7 @@ internal static class Mf
     /// returns (decoded frame count, mean luma 0..255). A file that parses but decodes to
     /// nothing or to black fails here — the check the container metadata can't fake.
     /// </summary>
-    public static (int Frames, double Luma) ProbeVideo(string path, int maxSamples = 10)
+    public static (int Frames, double Luma, TimeSpan Duration) ProbeVideo(string path, int maxSamples = 10)
     {
         EnsureStarted();
         Check(MFCreateSourceReaderFromURL(path, IntPtr.Zero, out var reader));
@@ -380,10 +380,16 @@ internal static class Mf
             int frames = 0;
             long total = 0;
             long count = 0;
+            long lastTimestamp = 0; // 100 ns units; WGC delivers frames only on change,
+                                    // so duration, not frame count, is what length means.
             while (frames < maxSamples)
             {
                 Check(reader.ReadSample(
-                    SOURCE_READER_FIRST_VIDEO_STREAM, 0, out _, out uint flags, out _, out IntPtr samplePtr));
+                    SOURCE_READER_FIRST_VIDEO_STREAM, 0, out _, out uint flags, out long timestamp, out IntPtr samplePtr));
+                if (samplePtr != IntPtr.Zero && timestamp > lastTimestamp)
+                {
+                    lastTimestamp = timestamp;
+                }
                 if (samplePtr == IntPtr.Zero)
                 {
                     if ((flags & READERF_ENDOFSTREAM) != 0)
@@ -434,7 +440,7 @@ internal static class Mf
                 }
             }
 
-            return (frames, count == 0 ? 0 : total / (double)count);
+            return (frames, count == 0 ? 0 : total / (double)count, TimeSpan.FromTicks(lastTimestamp));
         }
         finally
         {

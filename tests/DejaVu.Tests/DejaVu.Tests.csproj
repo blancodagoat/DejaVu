@@ -31,6 +31,7 @@
     <Compile Include="..\..\src\DejaVu\CaptureEngine.cs" />
     <Compile Include="..\..\src\DejaVu\Mp4Concat.cs" />
     <Compile Include="..\..\src\DejaVu\UpdateCheck.cs" />
+    <Compile Include="..\..\src\DejaVu\IssueReport.cs" />
   </ItemGroup>
 
   <ItemGroup>
