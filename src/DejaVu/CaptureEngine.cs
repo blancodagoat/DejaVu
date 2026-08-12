@@ -48,7 +48,22 @@ internal sealed class CaptureEngine : IDisposable
     /// <summary>Frames written to the current segment file so far.</summary>
     public int FramesInSegment => framesInSegment;
 
-    public Guid Codec { get; }
+    public Guid Codec { get; private set; }
+
+    /// <summary>Even-aligned and clamped to the codec's ceiling, aspect preserved.
+    /// H.264 encoders cap at 4096 per axis; hardware AV1 goes to 8192.</summary>
+    public static (int W, int H) FitEncoder(int w, int h, Guid codec)
+    {
+        int cap = codec == Mf.VideoFormat_AV1 ? 8192 : 4096;
+        if (w > cap || h > cap)
+        {
+            double scale = Math.Min((double)cap / w, (double)cap / h);
+            w = (int)(w * scale);
+            h = (int)(h * scale);
+        }
+
+        return (Math.Max(2, w & ~1), Math.Max(2, h & ~1));
+    }
 
     /// <summary>Captures a monitor (window handle zero) or a window (monitor zero).</summary>
     public CaptureEngine(IntPtr monitor, IntPtr window, int fps, int quality)
@@ -101,12 +116,16 @@ internal sealed class CaptureEngine : IDisposable
 
         width = item.Size.Width;
         height = item.Size.Height;
+        if (width < 2 || height < 2)
+        {
+            throw new InvalidOperationException("The capture target has no visible size (minimized window?).");
+        }
 
         // ARGB32, deliberately: MF maps it to B8G8R8A8 — the exact format of WGC frame
         // textures. RGB32 would map to B8G8R8X8, and CopyResource silently no-ops on a
         // format mismatch, encoding untouched (black) allocator textures. Diagnosed by
         // decode-probing output that "looked" valid by size and duration.
-        inputType = CreateVideoType(Mf.VideoFormat_ARGB32, stride: width * 4);
+        inputType = CreateVideoType(Mf.VideoFormat_ARGB32, width, height, stride: width * 4);
 
         // GPU-backed sample pool with hard backpressure: initial 2, max 6 in flight.
         // A slow encoder empties the pool and frames drop — memory stays flat.
@@ -139,6 +158,7 @@ internal sealed class CaptureEngine : IDisposable
             writer = CreateWriter(segmentPath);
             framesInSegment = 0;
             segmentEpochTicks = -1;
+            errored = false;
         }
 
         session.StartCapture();
@@ -160,6 +180,9 @@ internal sealed class CaptureEngine : IDisposable
             writer = CreateWriter(nextSegmentPath);
             framesInSegment = 0;
             segmentEpochTicks = -1;
+            // One report per segment, not per engine: without the reset, an engine
+            // that errored once cycles on mute until something else kills it.
+            errored = false;
         }
 
         if (old is not null)
@@ -215,6 +238,22 @@ internal sealed class CaptureEngine : IDisposable
         string stage = "start";
         try
         {
+            // A resized window (or changed display mode) delivers frames at a new size;
+            // CopyResource silently no-ops on mismatched textures and the clip freezes
+            // while looking healthy. Surface it through the error path — the restart
+            // rebuilds the engine at the new size.
+            var contentSize = frame.ContentSize;
+            if (contentSize.Width != width || contentSize.Height != height)
+            {
+                if (!errored)
+                {
+                    errored = true;
+                    Error?.Invoke($"capture size changed to {contentSize.Width}x{contentSize.Height}");
+                }
+
+                return;
+            }
+
             long now = frame.SystemRelativeTime.Ticks;
             lock (gate)
             {
@@ -309,6 +348,23 @@ internal sealed class CaptureEngine : IDisposable
 
     private Mf.IMFSinkWriter CreateWriter(string path)
     {
+        try
+        {
+            return CreateWriterFor(path, Codec);
+        }
+        catch when (Codec == Mf.VideoFormat_AV1)
+        {
+            // AV1 MFTs carry their own type limits (frame-size minimums among them).
+            // H.264 is the universal fallback — sticky, so every later segment in the
+            // buffer matches and the mux never sees mixed codecs.
+            AppLog.Write("AV1 encoder rejected the stream; falling back to H264");
+            Codec = Mf.VideoFormat_H264;
+            return CreateWriterFor(path, Codec);
+        }
+    }
+
+    private Mf.IMFSinkWriter CreateWriterFor(string path, Guid codec)
+    {
         Mf.Check(Mf.MFCreateAttributes(out var attrs, 4));
         var key = Mf.READWRITE_ENABLE_HARDWARE_TRANSFORMS;
         Mf.Check(attrs.SetUINT32(ref key, 1));
@@ -332,26 +388,40 @@ internal sealed class CaptureEngine : IDisposable
             Marshal.ReleaseComObject(attrs);
         }
 
-        var outputType = CreateVideoType(Codec, stride: 0);
         try
         {
-            Mf.Check(newWriter.AddStream(outputType, out streamIndex));
-            Mf.Check(newWriter.SetInputMediaType(streamIndex, inputType, IntPtr.Zero));
-        }
-        finally
-        {
-            Marshal.ReleaseComObject(outputType);
-        }
+            // Encode size is not capture size: encoders reject odd dimensions
+            // (drag-resized windows) and have ceilings (H.264 caps at 4096 — ultrawide
+            // and portrait-4K monitors exceed it). Input stays at the exact capture
+            // size because CopyResource requires identical textures; when they differ,
+            // the sink writer inserts a video processor to scale.
+            var (encodeW, encodeH) = FitEncoder(width, height, codec);
+            var outputType = CreateVideoType(codec, encodeW, encodeH, stride: 0);
+            try
+            {
+                Mf.Check(newWriter.AddStream(outputType, out streamIndex));
+                Mf.Check(newWriter.SetInputMediaType(streamIndex, inputType, IntPtr.Zero));
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(outputType);
+            }
 
-        QualityModeActive = TrySetQualityMode(newWriter, streamIndex);
-        Mf.Check(newWriter.BeginWriting());
-        return newWriter;
+            QualityModeActive = TrySetQualityMode(newWriter, streamIndex);
+            Mf.Check(newWriter.BeginWriting());
+            return newWriter;
+        }
+        catch
+        {
+            Marshal.ReleaseComObject(newWriter);
+            throw;
+        }
     }
 
     /// <summary>True when the encoder accepted constant-quality rate control.</summary>
     public bool QualityModeActive { get; private set; }
 
-    private Mf.IMFMediaType CreateVideoType(Guid subtype, int stride)
+    private Mf.IMFMediaType CreateVideoType(Guid subtype, int w, int h, int stride)
     {
         Mf.Check(Mf.MFCreateMediaType(out var type));
         var major = Mf.MT_MAJOR_TYPE;
@@ -360,7 +430,7 @@ internal sealed class CaptureEngine : IDisposable
         Mf.Check(type.SetGUID(ref major, ref video));
         Mf.Check(type.SetGUID(ref sub, ref subtype));
         var key = Mf.MT_FRAME_SIZE;
-        Mf.Check(type.SetUINT64(ref key, ((ulong)(uint)width << 32) | (uint)height));
+        Mf.Check(type.SetUINT64(ref key, ((ulong)(uint)w << 32) | (uint)h));
         key = Mf.MT_FRAME_RATE;
         Mf.Check(type.SetUINT64(ref key, ((ulong)(uint)fps << 32) | 1));
         key = Mf.MT_INTERLACE_MODE;
@@ -410,10 +480,22 @@ internal sealed class CaptureEngine : IDisposable
                 object modeValue = 3u; // eAVEncCommonRateControlMode_Quality
                 codec.SetValue(ref mode, ref modeValue);
 
-                var q = CODECAPI_AVEncCommonQuality;
-                object qualityValue = (uint)quality;
-                codec.SetValue(ref q, ref qualityValue);
-                return true;
+                try
+                {
+                    var q = CODECAPI_AVEncCommonQuality;
+                    object qualityValue = (uint)quality;
+                    codec.SetValue(ref q, ref qualityValue);
+                    return true;
+                }
+                catch
+                {
+                    // Intel/AMD accept the mode switch but not the quality knob. Left
+                    // half-applied, the encoder runs quality mode at a vendor default
+                    // and MT_AVG_BITRATE is ignored — put it back on bitrate control.
+                    object cbr = 0u; // eAVEncCommonRateControlMode_CBR
+                    codec.SetValue(ref mode, ref cbr);
+                    return false;
+                }
             }
             catch
             {
@@ -453,7 +535,10 @@ internal sealed class CaptureEngine : IDisposable
         try
         {
             Mf.EnsureStarted();
-            return Mf.HasHardwareEncoder(Mf.VideoFormat_AV1);
+            // Encoder AND decoder: saves are decode-verified, and Win10 has no in-box
+            // AV1 decoder even on GPUs that encode it — choosing AV1 there means every
+            // save is muxed, fails the probe, and gets deleted.
+            return Mf.HasHardwareEncoder(Mf.VideoFormat_AV1) && Mf.HasDecoder(Mf.VideoFormat_AV1);
         }
         catch
         {

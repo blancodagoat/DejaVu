@@ -25,8 +25,19 @@ internal sealed class SingleInstance : IDisposable
 
     public static SingleInstance Acquire()
     {
-        var mutex = new Mutex(initiallyOwned: true, MutexName, out bool created);
-        return new SingleInstance(mutex, created);
+        try
+        {
+            var mutex = new Mutex(initiallyOwned: true, MutexName, out bool created);
+            return new SingleInstance(mutex, created);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // The running instance is elevated ("Restart as administrator") and this
+            // launch is not: opening its mutex is denied by integrity levels. That IS
+            // "already running" — the old behavior was a raw crash before the exception
+            // handlers even existed.
+            return new SingleInstance(new Mutex(), owned: false);
+        }
     }
 
     /// <summary>Wakes the running instance. Best-effort — a missing handle just means no-op.</summary>

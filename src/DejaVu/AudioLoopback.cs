@@ -4,10 +4,11 @@ using System.Runtime.InteropServices;
 namespace DejaVu;
 
 /// <summary>
-/// System-audio capture that can leave one app out of the mix. With an exclude PID it
-/// activates Windows' process-loopback virtual device (Win10 2004+) in
-/// exclude-target-process-tree mode — everything except that app's tree (Discord and its
-/// voice children, typically). With PID 0 it captures the default render endpoint whole.
+/// System-audio capture that can leave one app out of the mix — or keep only one in.
+/// With a PID it activates Windows' process-loopback virtual device (Win10 2004+):
+/// exclude mode drops that app's tree (Discord and its voice children, typically),
+/// include mode captures nothing but it (the captured game, keeping virtual-mixer
+/// mic re-renders out). With PID 0 it captures the default render endpoint whole.
 /// PCM is encoded to AAC on the fly through a Media Foundation sink writer, one file per
 /// buffer segment; silence is synthesized whenever the system renders nothing, because
 /// loopback delivers no packets then and the AAC timeline must stay continuous.
@@ -34,15 +35,20 @@ internal sealed class AudioLoopback : IDisposable
     private readonly Stopwatch clock = new();
 
     private long writtenFrames;
+    private long baseFrames;
+    private long synthesizedFrames;
     private volatile bool stopping;
     private bool finalized;
+    private bool deviceErrorLogged;
 
-    /// <summary>Null when audio capture is unavailable; the caller records silent video.</summary>
-    public static AudioLoopback? TryStart(string outputPath, int excludePid)
+    /// <summary>Null when audio capture is unavailable; the caller records silent video.
+    /// With <paramref name="includeOnly"/> the pid's tree is the whole mix instead of the
+    /// one part left out — "captured app audio only".</summary>
+    public static AudioLoopback? TryStart(string outputPath, int pid, bool includeOnly = false)
     {
         try
         {
-            return new AudioLoopback(outputPath, excludePid);
+            return new AudioLoopback(outputPath, pid, includeOnly);
         }
         catch (Exception ex)
         {
@@ -53,26 +59,16 @@ internal sealed class AudioLoopback : IDisposable
         }
     }
 
-    private AudioLoopback(string outputPath, int excludePid)
+    private AudioLoopback(string outputPath, int pid, bool includeOnly)
     {
         Mf.EnsureStarted();
 
-        Mf.Check(Mf.MFCreateSinkWriterFromURL(outputPath, IntPtr.Zero, IntPtr.Zero, out writer));
-        var aac = Mf.CreateAudioType(Mf.AudioFormat_AAC, SampleRate, Channels, BitsPerSample, 24000, 0);
-        var pcm = Mf.CreateAudioType(Mf.AudioFormat_PCM, SampleRate, Channels, BitsPerSample, BytesPerSecond, BlockAlign);
-        try
-        {
-            Mf.Check(writer.AddStream(aac, out streamIndex));
-            Mf.Check(writer.SetInputMediaType(streamIndex, pcm, IntPtr.Zero));
-            Mf.Check(writer.BeginWriting());
-        }
-        finally
-        {
-            Marshal.ReleaseComObject(aac);
-            Marshal.ReleaseComObject(pcm);
-        }
-
-        client = excludePid > 0 ? ActivateProcessLoopback(excludePid) : ActivateEndpointLoopback();
+        // Device first, writer last: activation is the step that fails on machines with
+        // no working endpoint, and creating the sink writer before it leaked one writer
+        // plus one locked zero-byte aud_*.mp4 per segment, forever, on those boxes.
+        client = pid > 0
+            ? ActivateProcessLoopback(pid, includeOnly ? LoopbackModeIncludeTree : LoopbackModeExcludeTree)
+            : ActivateEndpointLoopback();
 
         var format = Marshal.AllocHGlobal(18);
         try
@@ -87,7 +83,7 @@ internal sealed class AudioLoopback : IDisposable
             Marshal.WriteInt16(format, 16, 0);
 
             uint flags = AUDCLNT_STREAMFLAGS_LOOPBACK;
-            if (excludePid == 0)
+            if (pid == 0)
             {
                 // The endpoint path must accept our fixed format; the process-loopback
                 // virtual device takes the requested format as-is.
@@ -107,6 +103,51 @@ internal sealed class AudioLoopback : IDisposable
         capture = (IAudioCaptureClient)Marshal.GetObjectForIUnknown(capturePtr);
         Marshal.Release(capturePtr);
 
+        try
+        {
+            // Same throttling opt-out as every other writer in the app: the sink
+            // writer's pacing was caught blocking in a memory dump once already, and
+            // the resync path below can burst a second of silence at a time.
+            Mf.Check(Mf.MFCreateAttributes(out var attrs, 1));
+            var key = Mf.SINK_WRITER_DISABLE_THROTTLING;
+            Mf.Check(attrs.SetUINT32(ref key, 1));
+            var attrsPtr = Marshal.GetIUnknownForObject(attrs);
+            try
+            {
+                Mf.Check(Mf.MFCreateSinkWriterFromURL(outputPath, IntPtr.Zero, attrsPtr, out writer));
+            }
+            finally
+            {
+                Marshal.Release(attrsPtr);
+                Marshal.ReleaseComObject(attrs);
+            }
+
+            var aac = Mf.CreateAudioType(Mf.AudioFormat_AAC, SampleRate, Channels, BitsPerSample, 24000, 0);
+            var pcm = Mf.CreateAudioType(Mf.AudioFormat_PCM, SampleRate, Channels, BitsPerSample, BytesPerSecond, BlockAlign);
+            try
+            {
+                Mf.Check(writer.AddStream(aac, out streamIndex));
+                Mf.Check(writer.SetInputMediaType(streamIndex, pcm, IntPtr.Zero));
+                Mf.Check(writer.BeginWriting());
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(aac);
+                Marshal.ReleaseComObject(pcm);
+            }
+        }
+        catch
+        {
+            if (writer is not null)
+            {
+                Marshal.ReleaseComObject(writer);
+            }
+
+            Marshal.ReleaseComObject(capture);
+            Marshal.ReleaseComObject(client);
+            throw;
+        }
+
         Mf.Check(client.Start());
         clock.Start();
 
@@ -116,34 +157,90 @@ internal sealed class AudioLoopback : IDisposable
 
     private void Pump()
     {
-        while (!stopping)
+        try
         {
-            Thread.Sleep(10);
-            Drain();
-
-            // Loopback goes quiet when nothing renders; keep the timeline continuous.
-            // Lag up to ~20 ms is packet jitter, anything beyond becomes silence.
-            long expected = (long)(clock.Elapsed.TotalSeconds * SampleRate);
-            long deficit = expected - writtenFrames - SampleRate / 50;
-            if (deficit > 0)
+            while (!stopping)
             {
-                WriteFrames(IntPtr.Zero, (int)Math.Min(deficit, SampleRate));
+                Thread.Sleep(10);
+                Drain();
+
+                // Loopback goes quiet when nothing renders; keep the timeline continuous.
+                // Lag up to ~20 ms is packet jitter, anything beyond becomes silence.
+                long expected = baseFrames + (long)(clock.Elapsed.TotalSeconds * SampleRate);
+                long deficit = expected - writtenFrames - SampleRate / 50;
+                if (deficit > 2 * SampleRate)
+                {
+                    // The thread itself was suspended (sleep/resume, hibernate) — the
+                    // per-iteration fill can only ever fall ~16 ms behind on its own.
+                    // Filling the whole gap wrote hours of silence at 100× real time
+                    // and shoved every later segment's timeline forward. Resync instead.
+                    AppLog.Write($"audio resync after a {deficit / SampleRate} s gap");
+                    clock.Restart();
+                    baseFrames = writtenFrames;
+                    continue;
+                }
+
+                if (deficit > 0)
+                {
+                    synthesizedFrames += Math.Min(deficit, SampleRate);
+                    WriteFrames(IntPtr.Zero, (int)Math.Min(deficit, SampleRate));
+                }
             }
+        }
+        catch (Exception ex)
+        {
+            // Disk full, an MFT dying after device loss — the video pump survives its
+            // failures and this thread crashing took the whole process with it.
+            AppLog.Write("audio pump stopped: " + ex.Message);
         }
     }
 
     private void Drain()
     {
-        while (capture.GetNextPacketSize(out uint packet) >= 0 && packet > 0)
+        while (true)
         {
-            if (capture.GetBuffer(out var data, out uint frames, out uint flags, out _, out _) < 0)
+            int hr = capture.GetNextPacketSize(out uint packet);
+            if (hr < 0)
             {
+                LogDeviceError("GetNextPacketSize", hr);
+                return;
+            }
+
+            if (packet == 0)
+            {
+                return;
+            }
+
+            hr = capture.GetBuffer(out var data, out uint frames, out uint flags, out _, out _);
+            if (hr < 0)
+            {
+                LogDeviceError("GetBuffer", hr);
+                return;
+            }
+
+            if (frames == 0)
+            {
+                // A phantom packet (driver reports a size it cannot hand over) would
+                // otherwise spin this loop at 100% CPU.
+                capture.ReleaseBuffer(0);
                 return;
             }
 
             bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
             WriteFrames(silent ? IntPtr.Zero : data, (int)frames);
             capture.ReleaseBuffer(frames);
+        }
+    }
+
+    /// <summary>Once per instance: a dead device (unplugged, default switched, driver
+    /// restart) fails every call until the next segment builds a fresh capture, and the
+    /// old behavior — synthesize silence, say nothing — was undiagnosable in the field.</summary>
+    private void LogDeviceError(string call, int hr)
+    {
+        if (!deviceErrorLogged)
+        {
+            deviceErrorLogged = true;
+            AppLog.Write($"audio device error: {call} 0x{hr:X8}; silence until the next segment");
         }
     }
 
@@ -170,7 +267,20 @@ internal sealed class AudioLoopback : IDisposable
 
         finalized = true;
         stopping = true;
-        pump.Join(2000);
+        if (!pump.Join(2000))
+        {
+            // The pump is wedged inside a call to a dead device; finalizing or
+            // releasing the writer under it is an access violation waiting to happen.
+            // A bounded, logged leak beats a crash.
+            AppLog.Write("audio pump did not stop; abandoning this audio segment");
+            return;
+        }
+
+        if (synthesizedFrames > 0 && writtenFrames > SampleRate
+            && synthesizedFrames * 10 >= writtenFrames * 9)
+        {
+            AppLog.Write($"audio was {synthesizedFrames * 100 / writtenFrames}% synthesized silence this segment");
+        }
 
         try
         {
@@ -198,18 +308,19 @@ internal sealed class AudioLoopback : IDisposable
 
     private const string VirtualLoopbackDevice = @"VAD\Process_Loopback";
     private const int ActivationTypeProcessLoopback = 1;
+    private const int LoopbackModeIncludeTree = 0;
     private const int LoopbackModeExcludeTree = 1;
     private const ushort VT_BLOB = 65;
 
-    private static IAudioClient ActivateProcessLoopback(int excludePid)
+    private static IAudioClient ActivateProcessLoopback(int pid, int mode)
     {
         // AUDIOCLIENT_ACTIVATION_PARAMS { type, { TargetProcessId, ProcessLoopbackMode } }
         var paramsBlob = Marshal.AllocHGlobal(12);
         try
         {
             Marshal.WriteInt32(paramsBlob, 0, ActivationTypeProcessLoopback);
-            Marshal.WriteInt32(paramsBlob, 4, excludePid);
-            Marshal.WriteInt32(paramsBlob, 8, LoopbackModeExcludeTree);
+            Marshal.WriteInt32(paramsBlob, 4, pid);
+            Marshal.WriteInt32(paramsBlob, 8, mode);
 
             var propvariant = new PROPVARIANT { vt = VT_BLOB, blobSize = 12, blobData = paramsBlob };
             var handler = new ActivateHandler();
@@ -219,6 +330,10 @@ internal sealed class AudioLoopback : IDisposable
 
             if (!handler.Done.Wait(5000))
             {
+                // The service may still be reading the params blob — leak its 12 bytes
+                // deliberately rather than free memory under a live async operation.
+                paramsBlob = IntPtr.Zero;
+                Marshal.ReleaseComObject(operation);
                 throw new TimeoutException("Audio interface activation timed out.");
             }
 
@@ -235,7 +350,10 @@ internal sealed class AudioLoopback : IDisposable
         }
         finally
         {
-            Marshal.FreeHGlobal(paramsBlob);
+            if (paramsBlob != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(paramsBlob);
+            }
         }
     }
 

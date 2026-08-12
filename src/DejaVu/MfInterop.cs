@@ -71,6 +71,32 @@ internal static class Mf
         return count > 0;
     }
 
+    /// <summary>True when any decoder MFT (hardware or software) for the subtype is
+    /// registered. Encoder presence alone is not enough to pick a codec: saves are
+    /// decode-verified, and Win10 ships no AV1 decoder even on AV1-encoding GPUs.</summary>
+    public static bool HasDecoder(Guid subtype)
+    {
+        var info = new MFT_REGISTER_TYPE_INFO { guidMajorType = MediaType_Video, guidSubtype = subtype };
+        var category = new Guid("d6c02d4b-6833-45b4-971a-05a4b04bab91"); // MFT_CATEGORY_VIDEO_DECODER
+        // HARDWARE | SYNCMFT | ASYNCMFT | SORTANDFILTER
+        if (MFTEnumExByInput(category, 0x47, ref info, IntPtr.Zero, out var activates, out int count) < 0)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            Marshal.Release(Marshal.ReadIntPtr(activates, i * IntPtr.Size));
+        }
+
+        if (activates != IntPtr.Zero)
+        {
+            Marshal.FreeCoTaskMem(activates);
+        }
+
+        return count > 0;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     public struct MFT_REGISTER_TYPE_INFO
     {
@@ -81,6 +107,11 @@ internal static class Mf
     [DllImport("mfplat.dll")]
     private static extern int MFTEnumEx(
         Guid category, uint flags, IntPtr inputType, ref MFT_REGISTER_TYPE_INFO outputType,
+        out IntPtr activates, out int count);
+
+    [DllImport("mfplat.dll", EntryPoint = "MFTEnumEx")]
+    private static extern int MFTEnumExByInput(
+        Guid category, uint flags, ref MFT_REGISTER_TYPE_INFO inputType, IntPtr outputType,
         out IntPtr activates, out int count);
 
     [DllImport("mfplat.dll")]
@@ -516,9 +547,9 @@ internal static class Mf
         [PreserveSig] int _CompareItem();
         [PreserveSig] int _Compare();
         [PreserveSig] int _GetUINT32();
-        [PreserveSig] int _GetUINT64();
+        [PreserveSig] int GetUINT64(ref Guid key, out ulong value);
         [PreserveSig] int _GetDouble();
-        [PreserveSig] int _GetGUID();
+        [PreserveSig] int GetGUID(ref Guid key, out Guid value);
         [PreserveSig] int _GetStringLength();
         [PreserveSig] int _GetString();
         [PreserveSig] int _GetAllocatedString();

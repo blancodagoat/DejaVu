@@ -36,6 +36,8 @@ internal sealed class ReplayBuffer : IDisposable
     private int giveUpStreak;
     private bool manuallyPaused;
     private bool audioWarned;
+    private int zeroFrameStreak;
+    private string? lastAudioDesc;
 
 
     public ReplayBuffer(AppConfig config, int segmentSeconds = 60)
@@ -43,9 +45,32 @@ internal sealed class ReplayBuffer : IDisposable
         this.config = config;
         this.segmentSeconds = segmentSeconds;
         cycleTimer = new System.Threading.Timer(_ => Cycle());
-        // Leftovers from a previous session are NOT cleared here — they are a crashed
-        // session's buffer, and RecoverCrashedSession turns them into a saved clip.
-        Directory.CreateDirectory(AppInfo.BufferDirectory);
+        try
+        {
+            // Leftovers from a previous session are NOT cleared here — they are a crashed
+            // session's buffer, and RecoverCrashedSession turns them into a saved clip.
+            Directory.CreateDirectory(AppInfo.BufferDirectory);
+
+            // Quarantined buffers exist for diagnosis, not as a permanent archive: on
+            // exactly the machines that crash most they accumulate gigabytes forever.
+            var quarantine = AppInfo.BufferDirectory + "-quarantine";
+            if (Directory.Exists(quarantine))
+            {
+                foreach (var file in Directory.EnumerateFiles(quarantine))
+                {
+                    if (File.GetLastWriteTime(file) < DateTime.Now.AddDays(-7))
+                    {
+                        TryDelete(file);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // An unwritable LocalAppData (quota, roaming profile offline) must not kill
+            // startup here with no UI — every segment start will report it instead.
+            AppLog.Write("buffer directory unavailable: " + ex.Message);
+        }
     }
 
     public bool Running
@@ -114,9 +139,22 @@ internal sealed class ReplayBuffer : IDisposable
 
     public string? RecoverCrashedSession()
     {
+        // Snapshot first: cleanup below is scoped to what existed at entry, so a
+        // recovery that outlives its timeout can never delete the segments of the live
+        // session that started without it.
+        string[] snapshot;
+        try
+        {
+            snapshot = Directory.GetFiles(AppInfo.BufferDirectory);
+        }
+        catch
+        {
+            return null;
+        }
+
         // The in-flight segment of a crashed session is still split into its video and
         // audio halves. Join what can be joined so the recovered clip includes it.
-        foreach (var video in Directory.EnumerateFiles(AppInfo.BufferDirectory, "vid_*.mp4"))
+        foreach (var video in snapshot.Where(f => Path.GetFileName(f).StartsWith("vid_", StringComparison.Ordinal)))
         {
             var stamp = Path.GetFileNameWithoutExtension(video)["vid_".Length..];
             JoinSegment(
@@ -125,14 +163,47 @@ internal sealed class ReplayBuffer : IDisposable
                 Path.Combine(AppInfo.BufferDirectory, $"{SegmentPrefix}{stamp}.mp4"));
         }
 
-        var leftovers = ListSegments().OrderBy(s => s.Start).Select(s => s.Path).ToList();
+        // Only segments that existed at entry or were just joined from entry-time
+        // halves are ours to stitch and delete — never anything a live session wrote.
+        var owned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in snapshot)
+        {
+            var name = Path.GetFileName(file);
+            if (name.StartsWith(SegmentPrefix, StringComparison.Ordinal))
+            {
+                owned.Add(file);
+            }
+            else if (name.StartsWith("vid_", StringComparison.Ordinal))
+            {
+                var stamp = Path.GetFileNameWithoutExtension(name)["vid_".Length..];
+                owned.Add(Path.Combine(AppInfo.BufferDirectory, $"{SegmentPrefix}{stamp}.mp4"));
+            }
+        }
+
+        var leftovers = ListSegments()
+            .Where(s => owned.Contains(s.Path))
+            .OrderBy(s => s.Start)
+            .Select(s => s.Path)
+            .ToList();
         if (leftovers.Count == 0)
         {
             return null;
         }
 
-        Directory.CreateDirectory(config.SaveRoot);
-        var output = Path.Combine(config.SaveRoot, $"recovered_{DateTime.Now:yyyy-MM-dd_HHmmss}.mp4");
+        string output;
+        try
+        {
+            Directory.CreateDirectory(config.SaveRoot);
+            output = UniqueClipPath(config.SaveRoot, "recovered");
+        }
+        catch (Exception ex)
+        {
+            // Unwritable save root (unplugged drive, protected folder): leave the
+            // buffer for the next launch instead of destroying the only copy.
+            AppLog.Write("recovery could not reach the save folder: " + ex.Message);
+            return null;
+        }
+
         try
         {
             for (int drop = 0; drop <= 1 && leftovers.Count > drop; drop++)
@@ -160,7 +231,15 @@ internal sealed class ReplayBuffer : IDisposable
         }
         finally
         {
-            ClearBufferDirectory();
+            foreach (var file in snapshot)
+            {
+                TryDelete(file);
+            }
+
+            foreach (var segment in leftovers)
+            {
+                TryDelete(segment);
+            }
         }
     }
 
@@ -182,9 +261,20 @@ internal sealed class ReplayBuffer : IDisposable
             try
             {
                 engine = new CaptureEngine(monitor, window, config.Fps, config.QualityValue);
+                engineMonitor = monitor;
+                engineWindow = window;
+                engine.Error += OnEngineError;
+
+                BeginSegmentPaths();
+                // Inside the guard on purpose: encoder negotiation happens here, not in
+                // the ctor, and an unguarded throw out of the startup Task.Run is a
+                // silently dead buffer with the red dot still lit.
+                engine.Start(currentVideoPath!);
             }
             catch (Exception ex)
             {
+                engine?.Dispose();
+                engine = null;
                 running = false;
                 AppLog.Write("capture could not start: " + ex.Message);
                 Failed?.Invoke("Capture could not start: " + ex.Message);
@@ -194,15 +284,14 @@ internal sealed class ReplayBuffer : IDisposable
             AppLog.Write($"buffering started: codec {(engine.Codec == Mf.VideoFormat_AV1 ? "AV1" : "H264")}, "
                 + $"target {(window != IntPtr.Zero ? "window" : "monitor")}, {config.Fps} fps, quality {config.QualityValue}");
 
-            engineMonitor = monitor;
-            engineWindow = window;
-            engine.Error += OnEngineError;
-
-            BeginSegmentPaths();
-            engine.Start(currentVideoPath!);
-            StartAudio();
             cycleTimer.Change(TimeSpan.FromSeconds(segmentSeconds), TimeSpan.FromSeconds(segmentSeconds));
         }
+
+        // Off the gate AND off the caller's thread: audio activation can block for
+        // seconds on a wedged audio service, Start() runs on the UI thread from the
+        // pause toggle, and StartAudio's stale-path check makes the race with a quick
+        // Stop harmless.
+        Task.Run(StartAudio);
     }
 
     /// <summary>The user's pause: suppresses the automatic cool-down retry too.</summary>
@@ -272,7 +361,8 @@ internal sealed class ReplayBuffer : IDisposable
         currentSegmentPath = Path.Combine(AppInfo.BufferDirectory, $"{SegmentPrefix}{stamp}.mp4");
     }
 
-    /// <summary>Caller must hold <see cref="gate"/>.</summary>
+    /// <summary>Call OUTSIDE <see cref="gate"/>: device activation can block for
+    /// seconds, and holding the gate through it freezes the tray menu and hotkey saves.</summary>
     private void StartAudio()
     {
         if (!config.SystemAudio)
@@ -280,13 +370,99 @@ internal sealed class ReplayBuffer : IDisposable
             return;
         }
 
-        currentAudio = AudioLoopback.TryStart(currentAudioPath!, FindExcludePid());
-        if (currentAudio is null && !audioWarned)
+        string? path;
+        IntPtr window;
+        lock (gate)
         {
-            audioWarned = true;
+            if (!running)
+            {
+                return;
+            }
+
+            path = currentAudioPath;
+            window = engineWindow;
+        }
+
+        // App-only mode needs a single process: the captured window's. Monitor and auto
+        // targets fall back to the usual mix-minus-exclusions. Which path runs decides
+        // which audio device family is in play, so log it when it changes — an audio bug
+        // report is unreadable without knowing which capture the session used.
+        AudioLoopback? audio;
+        string desc;
+        if (config.AppAudioOnly && window != IntPtr.Zero)
+        {
+            int pid = ResolveAudioPid(window);
+            desc = $"app-only (pid {pid})";
+            audio = AudioLoopback.TryStart(path!, pid, includeOnly: true);
+        }
+        else
+        {
+            int exclude = FindExcludePid();
+            desc = exclude > 0 ? $"system mix excluding pid {exclude}" : "full system mix";
+            audio = AudioLoopback.TryStart(path!, exclude);
+        }
+
+        bool warn;
+        lock (gate)
+        {
+            // A Stop/Restart may have won the race while the device was activating.
+            if (!running || currentAudioPath != path)
+            {
+                audio?.Dispose();
+                return;
+            }
+
+            currentAudio = audio;
+            if (desc != lastAudioDesc)
+            {
+                lastAudioDesc = desc;
+                AppLog.Write("audio: " + desc);
+            }
+
+            warn = audio is null && !audioWarned;
+            if (warn)
+            {
+                audioWarned = true;
+            }
+        }
+
+        if (warn)
+        {
             AppLog.Write("audio capture failed to start");
             Failed?.Invoke("Audio capture failed; replays will be silent.");
         }
+    }
+
+    /// <summary>The PID whose process tree renders the captured window's audio. UWP
+    /// windows belong to ApplicationFrameHost — the real app owns a child window.</summary>
+    private static int ResolveAudioPid(IntPtr hwnd)
+    {
+        Native.GetWindowThreadProcessId(hwnd, out uint pid);
+        try
+        {
+            using var process = System.Diagnostics.Process.GetProcessById((int)pid);
+            if (process.ProcessName == "ApplicationFrameHost")
+            {
+                uint host = pid;
+                Native.EnumChildWindows(hwnd, child =>
+                {
+                    Native.GetWindowThreadProcessId(child, out uint childPid);
+                    if (childPid != host && childPid != 0)
+                    {
+                        pid = childPid;
+                        return false;
+                    }
+
+                    return true;
+                });
+            }
+        }
+        catch
+        {
+            // Gone or inaccessible; the window's own pid is the best remaining answer.
+        }
+
+        return (int)pid;
     }
 
     private void OnEngineError(string message)
@@ -374,11 +550,50 @@ internal sealed class ReplayBuffer : IDisposable
             }
 
             Directory.CreateDirectory(config.SaveRoot);
-            var output = Path.Combine(config.SaveRoot, $"{appName}_{now:yyyy-MM-dd_HHmmss}.mp4");
 
-            // Always through the remuxer, even for a single segment: the buffer files are
-            // fragmented MP4, and this pass is what turns the save into a standard one.
-            Mp4Concat.Concat(segments, output);
+            // The remux needs roughly the buffer's size again; failing up front with a
+            // real message beats a bare 0x80070070 halfway through the write.
+            try
+            {
+                long need = segments.Sum(f => new FileInfo(f).Length);
+                var root = Path.GetPathRoot(Path.GetFullPath(config.SaveRoot));
+                if (root is not null && new DriveInfo(root).AvailableFreeSpace < need + (64L << 20))
+                {
+                    throw new InvalidOperationException(
+                        $"Not enough free space on {root} — the clip needs about {need >> 20} MB.");
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                throw;
+            }
+            catch
+            {
+                // UNC roots and exotic mounts have no DriveInfo; let the write decide.
+            }
+
+            var output = UniqueClipPath(config.SaveRoot, appName);
+
+            // System.IO handles long paths; the Media Foundation URL APIs do not, and
+            // fail with a bare HRESULT after the folder was created just fine.
+            if (output.Length >= 248)
+            {
+                throw new InvalidOperationException(
+                    "The save path is too long for Windows' media stack — choose a shorter replays folder.");
+            }
+
+            try
+            {
+                // Always through the remuxer, even for a single segment: the buffer files are
+                // fragmented MP4, and this pass is what turns the save into a standard one.
+                Mp4Concat.Concat(segments, output);
+            }
+            catch
+            {
+                // A partial MP4 is unplayable and would count toward the folder cap.
+                TryDelete(output);
+                throw;
+            }
 
             CapClipFolder();
             return output;
@@ -438,7 +653,25 @@ internal sealed class ReplayBuffer : IDisposable
     }
 
     private static readonly System.Text.RegularExpressions.Regex ClipNamePattern =
-        new(@"_\d{4}-\d{2}-\d{2}_\d{6}\.mp4$");
+        new(@"_\d{4}-\d{2}-\d{2}_\d{6}(_\d+)?\.mp4$");
+
+    /// <summary>
+    /// Timestamped clip path that never overwrites: DST fall-back replays the same
+    /// wall-clock second, and the old name collided and clobbered the earlier clip.
+    /// Invariant format — a Buddhist or Hijri calendar year would break
+    /// <see cref="ClipNamePattern"/> and with it the folder cap.
+    /// </summary>
+    private static string UniqueClipPath(string root, string baseName)
+    {
+        var stamp = DateTime.Now.ToString("yyyy-MM-dd_HHmmss", CultureInfo.InvariantCulture);
+        var path = Path.Combine(root, $"{baseName}_{stamp}.mp4");
+        for (int n = 2; File.Exists(path); n++)
+        {
+            path = Path.Combine(root, $"{baseName}_{stamp}_{n}.mp4");
+        }
+
+        return path;
+    }
 
     /// <summary>
     /// The segment files overlapping [now − window, now], oldest first. A segment starting
@@ -451,9 +684,28 @@ internal sealed class ReplayBuffer : IDisposable
         TimeSpan window,
         int segmentSeconds)
     {
-        var cutoff = now - window - TimeSpan.FromSeconds(segmentSeconds);
-        return segments
-            .Where(s => s.Start > cutoff && s.Start <= now)
+        // The cutoff anchors on min(now, newest segment): after a clock jump the wall
+        // clock and the segment stamps live in different time domains, and the LOOSER
+        // cutoff keeps the fresh footage from both. Backward jump (DST fall-back):
+        // pre-jump segments are "future" but survive the wall-clock cutoff, and the
+        // post-jump ones survive it trivially. Forward jump (first NTP sync): the
+        // newest-segment cutoff keeps everything real. Normal operation: the two
+        // anchors are near-identical and nothing changes.
+        var list = segments.ToList();
+        var newest = DateTime.MinValue;
+        foreach (var s in list)
+        {
+            if (s.Start > newest)
+            {
+                newest = s.Start;
+            }
+        }
+
+        var anchor = newest > DateTime.MinValue && newest < now ? newest : now;
+
+        var cutoff = anchor - window - TimeSpan.FromSeconds(segmentSeconds);
+        return list
+            .Where(s => s.Start > cutoff)
             .OrderBy(s => s.Start)
             .Select(s => s.Path)
             .ToList();
@@ -486,6 +738,7 @@ internal sealed class ReplayBuffer : IDisposable
     private void Cycle()
     {
         bool retarget = false;
+        bool rotated = false;
         lock (gate)
         {
             if (!running || engine is null)
@@ -509,13 +762,17 @@ internal sealed class ReplayBuffer : IDisposable
                     currentVideoPath!,
                     frames => OnSegmentFinalized(vid, aud, seg, audio, frames));
                 currentAudio = null;
-                StartAudio();
+                rotated = true;
             }
         }
 
         if (retarget)
         {
             Restart();
+        }
+        else if (rotated)
+        {
+            StartAudio();
         }
     }
 
@@ -538,12 +795,14 @@ internal sealed class ReplayBuffer : IDisposable
             {
                 consecutiveFailures = 0;
                 giveUpStreak = 0;
+                zeroFrameStreak = 0;
             }
         }
         else
         {
             TryDelete(videoPath);
             TryDelete(audioPath);
+            bool rebuild;
             lock (gate)
             {
                 // Keep cycling — recording resumes the moment the desktop is back — but
@@ -555,6 +814,20 @@ internal sealed class ReplayBuffer : IDisposable
                     AppLog.Write("segment had zero frames; falling back to the main display");
                     Failed?.Invoke("Capture produced no frames; watching the main display until it recovers.");
                 }
+
+                // A frame pool killed without an error (TDR, driver update, iGPU/dGPU
+                // switch, resume) delivers nothing forever, and when the target already
+                // IS the fallback display the retarget check never differs — a full
+                // rebuild is the only way back. Once per streak: a locked screen also
+                // produces empty segments, and a rebuild loop there would balloon-spam
+                // "could not start" against the secure desktop.
+                rebuild = ++zeroFrameStreak == 2;
+            }
+
+            if (rebuild)
+            {
+                AppLog.Write("two empty segments; rebuilding the capture engine");
+                Task.Run(Restart);
             }
         }
 
@@ -672,19 +945,15 @@ internal sealed class ReplayBuffer : IDisposable
         return (monitor != IntPtr.Zero ? monitor : Native.PrimaryMonitor(), IntPtr.Zero);
     }
 
-    /// <summary>Deletes segments that have aged out of the largest possible window.</summary>
+    /// <summary>Deletes segments beyond the largest possible window. By count, not
+    /// wall clock: a forward clock jump (first NTP sync, dual-boot RTC offset) used to
+    /// age out the entire buffer in one sweep.</summary>
     private void Prune()
     {
-        var cutoff = DateTime.Now
-            - TimeSpan.FromMinutes(config.BufferMinutes)
-            - TimeSpan.FromSeconds(2 * segmentSeconds);
-
-        foreach (var (path, start) in ListSegments())
+        int keep = config.BufferMinutes * 60 / segmentSeconds + 2;
+        foreach (var (path, _) in ListSegments().OrderByDescending(s => s.Start).Skip(keep))
         {
-            if (start < cutoff)
-            {
-                TryDelete(path);
-            }
+            TryDelete(path);
         }
     }
 

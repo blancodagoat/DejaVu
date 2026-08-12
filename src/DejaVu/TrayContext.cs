@@ -65,6 +65,7 @@ internal sealed class TrayContext : ApplicationContext
         // through it even while the indicator is hidden.
         _ = indicator.Handle;
         indicator.UseIcon = config.IndicatorStyle == "icon";
+        indicator.TargetDevice = config.CaptureTarget == "auto" ? null : config.CaptureTarget;
         if (config.ShowIndicator)
         {
             indicator.Show();
@@ -85,11 +86,25 @@ internal sealed class TrayContext : ApplicationContext
 
         // Recovery first, off the UI thread — stitching a crashed session's segments can
         // take a moment and buffering must not restart on top of them. Time-bounded:
-        // a hung recovery must never leave the app sitting dead in the tray.
+        // a hung recovery must never leave the app sitting dead in the tray. Guarded for
+        // the same reason: a throw out of this Task.Run used to skip buffer.Start()
+        // silently — a healthy-looking tray icon recording nothing, forever.
         Task.Run(() =>
         {
-            var (recovered, timedOut) = buffer.RecoverWithTimeout(TimeSpan.FromSeconds(30));
+            string? recovered = null;
+            bool timedOut = false;
+            try
+            {
+                (recovered, timedOut) = buffer.RecoverWithTimeout(TimeSpan.FromSeconds(30));
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write("startup recovery failed: " + ex.Message);
+                OnUi(() => FailureBalloon("Recovery failed", ex.Message, ToolTipIcon.Warning));
+            }
+
             buffer.Start();
+            OnUi(SyncPauseUi);
             if (recovered is not null)
             {
                 OnUi(() =>
@@ -106,6 +121,14 @@ internal sealed class TrayContext : ApplicationContext
                     ToolTipIcon.Warning));
             }
         });
+
+        // The corner dot is the only signal games don't suppress (Focus Assist eats
+        // balloons exactly when a game is up). Poll the real state so it can never
+        // assert "recording" over a buffer that gave up — or "paused" over one that
+        // auto-recovered.
+        var pulse = new System.Windows.Forms.Timer { Interval = 5000 };
+        pulse.Tick += (_, _) => SyncPauseUi();
+        pulse.Start();
 
         if (!hotkeyOk)
         {
@@ -154,6 +177,11 @@ internal sealed class TrayContext : ApplicationContext
         // the place for custom exclusions.
         menu.Items.Add(Toggle("Keep Discord out of clips", () => config.AudioExclude.Length > 0,
             v => { config.AudioExclude = v ? AppConfig.DefaultAudioExclude : []; buffer.Restart(); }));
+        // Include-mode loopback: when a window is the capture target, record only its
+        // process tree's audio. The clean answer to virtual mixers (SteelSeries Sonar)
+        // re-rendering the mic into an exclude-mode mix. No effect on monitor capture.
+        menu.Items.Add(Toggle("Captured app audio only", () => config.AppAudioOnly,
+            v => { config.AppAudioOnly = v; buffer.Restart(); }));
         menu.Items.Add(Choice("Corner indicator", new[] { "Off", "Red dot", "App icon" }, s => s,
             () => !config.ShowIndicator ? "Off" : config.IndicatorStyle == "icon" ? "App icon" : "Red dot",
             s =>
@@ -192,9 +220,11 @@ internal sealed class TrayContext : ApplicationContext
                     Balloon("Up to date", $"You're on the newest release (v{UpdateCheck.Current}).", ToolTipIcon.None);
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                Balloon("Update check failed", "Couldn't reach GitHub. Try again later.", ToolTipIcon.Warning);
+                // Proxies, TLS inspection, rate limits and plain blocks all land here;
+                // the actual reason beats a generic "try again later".
+                Balloon("Update check failed", "Couldn't reach GitHub: " + ex.Message, ToolTipIcon.Warning);
             }
             finally
             {
@@ -203,9 +233,21 @@ internal sealed class TrayContext : ApplicationContext
         };
         menu.Items.Add(updates);
 
+        // Off the UI thread: IsEnabled falls back to schtasks.exe with a 10 s wait when
+        // the Run value is absent — exactly the case for anyone who turned autostart
+        // off — and that used to freeze the menu on every open.
         var startup = new ToolStripMenuItem("Start with Windows");
-        startup.Click += (_, _) => { StartupRegistry.TrySet(!StartupRegistry.IsEnabled()); };
-        menu.Opening += (_, _) => startup.Checked = StartupRegistry.IsEnabled();
+        startup.Click += (_, _) => Task.Run(() =>
+        {
+            bool enable = !StartupRegistry.IsEnabled();
+            StartupRegistry.TrySet(enable);
+            OnUi(() => startup.Checked = StartupRegistry.IsEnabled());
+        });
+        menu.Opening += (_, _) => Task.Run(() =>
+        {
+            bool enabled = StartupRegistry.IsEnabled();
+            OnUi(() => startup.Checked = enabled);
+        });
         menu.Items.Add(startup);
 
         menu.Items.Add(new ToolStripMenuItem("Change save hotkey…", null, (_, _) => ShowHotkeyDialog()));
@@ -228,6 +270,9 @@ internal sealed class TrayContext : ApplicationContext
 
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Open replays folder", null, (_, _) => OpenSaveFolder()));
+        // Without this, a Controlled-Folder-Access-blocked Videos folder left users
+        // with every save failing and hand-editing config.json as the only way out.
+        menu.Items.Add(new ToolStripMenuItem("Change replays folder…", null, (_, _) => ChangeSaveFolder()));
         menu.Items.Add(new ToolStripMenuItem("Exit", null, (_, _) => ExitThread()));
         return menu;
     }
@@ -294,6 +339,8 @@ internal sealed class TrayContext : ApplicationContext
     {
         config.CaptureTarget = target;
         config.Save();
+        // The dot belongs on the display being captured, not always the primary.
+        indicator.TargetDevice = target == "auto" ? null : target;
         if (buffer.WindowTarget != IntPtr.Zero)
         {
             buffer.SetWindowTarget(IntPtr.Zero);
@@ -437,15 +484,41 @@ internal sealed class TrayContext : ApplicationContext
             buffer.Start();
         }
 
-        pauseItem.Text = buffer.Running ? "Pause buffering" : "Resume buffering";
-        indicator.Buffering = buffer.Running;
-        tray.Text = buffer.Running ? AppInfo.Name : AppInfo.Name + " — paused";
+        SyncPauseUi();
+    }
+
+    private void SyncPauseUi()
+    {
+        bool running = buffer.Running;
+        pauseItem.Text = running ? "Pause buffering" : "Resume buffering";
+        if (indicator.Buffering != running)
+        {
+            indicator.Buffering = running;
+        }
+
+        tray.Text = running ? AppInfo.Name : AppInfo.Name + " — paused";
     }
 
     private void OpenSaveFolder()
     {
         Directory.CreateDirectory(config.SaveRoot);
         Process.Start(new ProcessStartInfo(config.SaveRoot) { UseShellExecute = true });
+    }
+
+    private void ChangeSaveFolder()
+    {
+        using var dialog = new FolderBrowserDialog
+        {
+            Description = "Where saved replays go",
+            UseDescriptionForTitle = true,
+            SelectedPath = Directory.Exists(config.SaveRoot) ? config.SaveRoot : "",
+        };
+
+        if (dialog.ShowDialog() == DialogResult.OK && !string.IsNullOrWhiteSpace(dialog.SelectedPath))
+        {
+            config.SaveRoot = dialog.SelectedPath;
+            config.Save();
+        }
     }
 
     private void RevealLastSaved()

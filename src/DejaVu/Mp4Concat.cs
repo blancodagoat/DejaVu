@@ -34,7 +34,20 @@ internal static class Mp4Concat
 
         try
         {
-            WriteAll(readers, output);
+            // Write aside, move once: the save root can be a OneDrive-synced folder,
+            // and the sync engine grabs a growing MP4 that has no moov box yet —
+            // uploading garbage and sometimes holding the handle mid-write.
+            var temp = output + ".part.mp4";
+            try
+            {
+                WriteAll(readers, temp);
+                File.Move(temp, output, overwrite: true);
+            }
+            catch
+            {
+                try { File.Delete(temp); } catch { }
+                throw;
+            }
         }
         finally
         {
@@ -79,64 +92,113 @@ internal static class Mp4Concat
 
     private static void WriteAll(List<Mf.IMFSourceReader> readers, string output)
     {
+        // Pre-scan every input before declaring the writer's streams. Declaring from
+        // the first input broke two real-world ways: audio appearing in a later
+        // segment (autostart before the endpoint wakes → AddStream after BeginWriting
+        // throws and the save fails), and a resolution change mid-buffer (auto mode
+        // crossing mixed-resolution monitors → the clip decodes as garbage past the
+        // seam). Video is declared from the NEWEST segment's type; older segments with
+        // a different video format are dropped — recent footage wins.
+        var meta = new (bool HasVideo, Guid Subtype, ulong FrameSize, bool HasAudio)[readers.Count];
+        for (int r = 0; r < readers.Count; r++)
+        {
+            for (uint i = 0; readers[r].GetNativeMediaType(i, 0, out var type) == 0; i++)
+            {
+                Mf.Check(type.GetMajorType(out var major));
+                if (major == Mf.MediaType_Video)
+                {
+                    var sub = Mf.MT_SUBTYPE;
+                    var size = Mf.MT_FRAME_SIZE;
+                    Mf.Check(type.GetGUID(ref sub, out var subtype));
+                    Mf.Check(type.GetUINT64(ref size, out var frameSize));
+                    meta[r] = (true, subtype, frameSize, meta[r].HasAudio);
+                }
+                else if (major == Mf.MediaType_Audio)
+                {
+                    meta[r].HasAudio = true;
+                }
+
+                Marshal.ReleaseComObject(type);
+            }
+        }
+
+        int newest = -1;
+        for (int r = readers.Count - 1; r >= 0; r--)
+        {
+            if (meta[r].HasVideo)
+            {
+                newest = r;
+                break;
+            }
+        }
+
+        var include = new bool[readers.Count];
+        int dropped = 0;
+        for (int r = 0; r < readers.Count; r++)
+        {
+            include[r] = !meta[r].HasVideo || newest < 0
+                || (meta[r].Subtype == meta[newest].Subtype && meta[r].FrameSize == meta[newest].FrameSize);
+            if (!include[r])
+            {
+                dropped++;
+            }
+        }
+
+        if (dropped > 0)
+        {
+            AppLog.Write($"save: dropped {dropped} older segment(s) with a different video format");
+        }
+
         var writer = CreateFileWriter(output);
         try
         {
-            // Writer streams are declared from the first input's native types; later inputs
-            // map onto them by major type (video/audio).
-            int videoOut = -1;
+            int videoOut = newest >= 0 ? DeclareStream(writer, readers[newest], Mf.MediaType_Video) : -1;
             int audioOut = -1;
-            bool began = false;
+            for (int r = 0; r < readers.Count && audioOut < 0; r++)
+            {
+                if (include[r] && meta[r].HasAudio)
+                {
+                    audioOut = DeclareStream(writer, readers[r], Mf.MediaType_Audio);
+                }
+            }
+
+            if (videoOut < 0 && audioOut < 0)
+            {
+                throw new InvalidOperationException("None of the buffered segments hold usable streams.");
+            }
+
+            Mf.Check(writer.BeginWriting());
             long offset = 0;
 
-            foreach (var reader in readers)
+            for (int r = 0; r < readers.Count; r++)
             {
+                if (!include[r])
+                {
+                    continue;
+                }
+
+                var reader = readers[r];
                 Mf.Check(reader.SetStreamSelection(Mf.SOURCE_READER_ALL_STREAMS, true));
 
                 var streamMap = new Dictionary<uint, int>();
                 for (uint i = 0; reader.GetNativeMediaType(i, 0, out var type) == 0; i++)
                 {
                     Mf.Check(type.GetMajorType(out var major));
-                    int outIndex;
-                    if (major == Mf.MediaType_Video)
+                    if (major == Mf.MediaType_Video && videoOut >= 0)
                     {
-                        if (videoOut < 0)
-                        {
-                            Mf.Check(writer.AddStream(type, out videoOut));
-                            Mf.Check(writer.SetInputMediaType(videoOut, type, IntPtr.Zero));
-                        }
-
-                        outIndex = videoOut;
+                        streamMap[i] = videoOut;
                     }
-                    else if (major == Mf.MediaType_Audio)
+                    else if (major == Mf.MediaType_Audio && audioOut >= 0)
                     {
-                        if (audioOut < 0)
-                        {
-                            Mf.Check(writer.AddStream(type, out audioOut));
-                            Mf.Check(writer.SetInputMediaType(audioOut, type, IntPtr.Zero));
-                        }
-
-                        outIndex = audioOut;
-                    }
-                    else
-                    {
-                        Marshal.ReleaseComObject(type);
-                        continue;
+                        streamMap[i] = audioOut;
                     }
 
-                    streamMap[i] = outIndex;
                     Marshal.ReleaseComObject(type);
                 }
 
                 if (streamMap.Count == 0)
                 {
                     continue;
-                }
-
-                if (!began)
-                {
-                    Mf.Check(writer.BeginWriting());
-                    began = true;
                 }
 
                 long fileEnd = 0;
@@ -243,6 +305,31 @@ internal static class Mp4Concat
         {
             Marshal.ReleaseComObject(video);
         }
+    }
+
+    /// <summary>Adds a writer stream from the reader's first native type of the wanted
+    /// major type; -1 when the reader has none.</summary>
+    private static int DeclareStream(Mf.IMFSinkWriter writer, Mf.IMFSourceReader reader, Guid majorWanted)
+    {
+        for (uint i = 0; reader.GetNativeMediaType(i, 0, out var type) == 0; i++)
+        {
+            try
+            {
+                Mf.Check(type.GetMajorType(out var major));
+                if (major == majorWanted)
+                {
+                    Mf.Check(writer.AddStream(type, out int index));
+                    Mf.Check(writer.SetInputMediaType(index, type, IntPtr.Zero));
+                    return index;
+                }
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(type);
+            }
+        }
+
+        return -1;
     }
 
     private static int AddFirstStream(Mf.IMFSinkWriter writer, Mf.IMFSourceReader reader, uint stream)
