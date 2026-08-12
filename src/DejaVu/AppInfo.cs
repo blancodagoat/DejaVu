@@ -37,10 +37,14 @@ internal static class AppInfo
 
     /// <summary>
     /// The rolling segment ring. LocalAppData rather than %TEMP% so disk cleaners do not
-    /// yank segments out from under an active buffer.
+    /// yank segments out from under an active buffer. The env override exists for the
+    /// test harness: a test sharing the live app's ring made both prune and mux each
+    /// other's half-written segments.
     /// </summary>
-    public static string BufferDirectory => Path.Combine(
-        Known(Environment.SpecialFolder.LocalApplicationData), Name, "buffer");
+    public static string BufferDirectory =>
+        Environment.GetEnvironmentVariable("DEJAVU_BUFFER_DIR") is { Length: > 0 } custom
+            ? custom
+            : Path.Combine(Known(Environment.SpecialFolder.LocalApplicationData), Name, "buffer");
 
     public static string DefaultSaveRoot => Path.Combine(Known(Environment.SpecialFolder.MyVideos), Name);
 }

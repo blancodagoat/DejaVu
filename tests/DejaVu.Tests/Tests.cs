@@ -15,6 +15,11 @@ using DejaVu;
 // shim copy sits beside the exe. The "probe" child below proves it.
 Native.PinSystemDlls();
 
+// Tests must never share the live app's segment ring: two writers prune and mux each
+// other's half-written files. Child processes (probe/soakrecord) inherit this.
+Environment.SetEnvironmentVariable(
+    "DEJAVU_BUFFER_DIR", Path.Combine(Path.GetTempPath(), "DejaVu.TestBuffer"));
+
 int failed = 0, passed = 0;
 
 void Check(string name, bool ok, string? detail = null)
@@ -110,6 +115,35 @@ if (args.Length > 0 && args[0] == "apartment")
         Console.WriteLine("apartment isolation FAILED at stop: " + ex.Message);
         return 3;
     }
+}
+
+// Field diagnosis: capture a few seconds via each audio path and report the levels.
+// "audiopid <pid>" — include-tree of pid, exclude-tree of pid, and plain endpoint.
+if (args.Length > 1 && args[0] == "audiopid" && int.TryParse(args[1], out int targetPid))
+{
+    double Level(int pid, bool include)
+    {
+        var capPath = Path.Combine(Path.GetTempPath(), "dejavu_audiopid.mp4");
+        using (var cap = AudioLoopback.TryStart(capPath, pid, include))
+        {
+            if (cap is null)
+            {
+                return -1;
+            }
+
+            Thread.Sleep(4000);
+        }
+
+        double level = Mf.MeasureAudioLevel(capPath);
+        File.Delete(capPath);
+        return level;
+    }
+
+    Console.WriteLine(AudioLoopback.DumpAudioSessions());
+    Console.WriteLine($"include pid {targetPid}: {Level(targetPid, true):F4}");
+    Console.WriteLine($"exclude pid {targetPid}: {Level(targetPid, false):F4}");
+    Console.WriteLine($"endpoint (default device): {Level(0, false):F4}");
+    return 0;
 }
 
 // Field diagnosis: can Media Foundation open and decode this file on this machine?

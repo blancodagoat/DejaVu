@@ -59,6 +59,10 @@ internal sealed class AudioLoopback : IDisposable
         }
     }
 
+    /// <summary>How this capture is actually wired, for the log — audio bug reports are
+    /// unreadable without knowing which path a session used.</summary>
+    public string Route { get; }
+
     private AudioLoopback(string outputPath, int pid, bool includeOnly)
     {
         Mf.EnsureStarted();
@@ -66,9 +70,42 @@ internal sealed class AudioLoopback : IDisposable
         // Device first, writer last: activation is the step that fails on machines with
         // no working endpoint, and creating the sink writer before it leaked one writer
         // plus one locked zero-byte aud_*.mp4 per segment, forever, on those boxes.
-        client = pid > 0
-            ? ActivateProcessLoopback(pid, includeOnly ? LoopbackModeIncludeTree : LoopbackModeExcludeTree)
-            : ActivateEndpointLoopback();
+        bool vad = false;
+        if (pid > 0 && includeOnly)
+        {
+            // Per-app routing (SteelSeries Sonar/GG, Windows' per-app output devices)
+            // moves the app's session to its own endpoint, where the process-loopback
+            // virtual device hears NOTHING — measured dead silence against a game
+            // routed by GG. The endpoint hosting the app's session is the truth: on
+            // routed setups its mix IS the app (the mixer already keeps voice and mic
+            // on other endpoints), and only when the app shares the default device is
+            // the include-tree VAD both correct and necessary.
+            var routed = FindSessionDevice(pid);
+            if (routed is { IsDefault: false } home)
+            {
+                Route = $"app-only via the app's output device (pid {pid})";
+                client = ActivateDeviceLoopback(home.Device);
+            }
+            else
+            {
+                Route = routed is null
+                    ? $"app-only via process loopback (pid {pid}; no live session found yet)"
+                    : $"app-only via process loopback (pid {pid})";
+                vad = true;
+                client = ActivateProcessLoopback(pid, LoopbackModeIncludeTree);
+            }
+        }
+        else if (pid > 0)
+        {
+            Route = $"system mix excluding pid {pid}";
+            vad = true;
+            client = ActivateProcessLoopback(pid, LoopbackModeExcludeTree);
+        }
+        else
+        {
+            Route = "full system mix (default device)";
+            client = ActivateEndpointLoopback();
+        }
 
         var format = Marshal.AllocHGlobal(18);
         try
@@ -83,9 +120,9 @@ internal sealed class AudioLoopback : IDisposable
             Marshal.WriteInt16(format, 16, 0);
 
             uint flags = AUDCLNT_STREAMFLAGS_LOOPBACK;
-            if (pid == 0)
+            if (!vad)
             {
-                // The endpoint path must accept our fixed format; the process-loopback
+                // Endpoint paths must accept our fixed format; the process-loopback
                 // virtual device takes the requested format as-is.
                 flags |= AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
             }
@@ -357,21 +394,22 @@ internal sealed class AudioLoopback : IDisposable
         }
     }
 
-    private static IAudioClient ActivateEndpointLoopback()
+    private static IMMDeviceEnumerator CreateDeviceEnumerator()
     {
         var enumeratorType = Type.GetTypeFromCLSID(CLSID_MMDeviceEnumerator)
             ?? throw new InvalidOperationException("MMDeviceEnumerator unavailable.");
-        var enumerator = (IMMDeviceEnumerator)Activator.CreateInstance(enumeratorType)!;
+        return (IMMDeviceEnumerator)Activator.CreateInstance(enumeratorType)!;
+    }
+
+    private static IAudioClient ActivateEndpointLoopback()
+    {
+        var enumerator = CreateDeviceEnumerator();
         try
         {
             Mf.Check(enumerator.GetDefaultAudioEndpoint(0 /* eRender */, 0 /* eConsole */, out var device));
             try
             {
-                var iid = IID_IAudioClient;
-                Mf.Check(device.Activate(ref iid, 23 /* CLSCTX_ALL */, IntPtr.Zero, out var clientPtr));
-                var client = (IAudioClient)Marshal.GetObjectForIUnknown(clientPtr);
-                Marshal.Release(clientPtr);
-                return client;
+                return ActivateDeviceLoopback(device, release: false);
             }
             finally
             {
@@ -381,6 +419,248 @@ internal sealed class AudioLoopback : IDisposable
         finally
         {
             Marshal.ReleaseComObject(enumerator);
+        }
+    }
+
+    /// <summary>Loopback client for a specific render device. Takes ownership of
+    /// <paramref name="device"/> unless <paramref name="release"/> is false.</summary>
+    private static IAudioClient ActivateDeviceLoopback(IMMDevice device, bool release = true)
+    {
+        try
+        {
+            var iid = IID_IAudioClient;
+            Mf.Check(device.Activate(ref iid, 23 /* CLSCTX_ALL */, IntPtr.Zero, out var clientPtr));
+            var client = (IAudioClient)Marshal.GetObjectForIUnknown(clientPtr);
+            Marshal.Release(clientPtr);
+            return client;
+        }
+        finally
+        {
+            if (release)
+            {
+                Marshal.ReleaseComObject(device);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The active render device hosting an audio session owned by <paramref name="pid"/>,
+    /// or null when no live session exists. Virtual mixers assign apps their own
+    /// endpoints; the session table is the only place that routing is visible.
+    /// </summary>
+    private static (IMMDevice Device, bool IsDefault)? FindSessionDevice(int pid)
+    {
+        var enumerator = CreateDeviceEnumerator();
+        try
+        {
+            string? defaultId = null;
+            if (enumerator.GetDefaultAudioEndpoint(0, 0, out var def) >= 0)
+            {
+                defaultId = DeviceId(def);
+                Marshal.ReleaseComObject(def);
+            }
+
+            if (enumerator.EnumAudioEndpoints(0 /* eRender */, 1 /* DEVICE_STATE_ACTIVE */, out var devices) < 0)
+            {
+                return null;
+            }
+
+            try
+            {
+                Mf.Check(devices.GetCount(out int count));
+                for (int i = 0; i < count; i++)
+                {
+                    if (devices.Item(i, out var device) < 0)
+                    {
+                        continue;
+                    }
+
+                    if (HasSessionFor(device, pid))
+                    {
+                        return (device, DeviceId(device) == defaultId);
+                    }
+
+                    Marshal.ReleaseComObject(device);
+                }
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(devices);
+            }
+
+            return null;
+        }
+        catch
+        {
+            // Enumeration is best-effort; the caller falls back to process loopback.
+            return null;
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(enumerator);
+        }
+    }
+
+    /// <summary>Diagnostic: every active render device and the pids with sessions on
+    /// it. This table is the ground truth per-app routing hides in.</summary>
+    internal static string DumpAudioSessions()
+    {
+        var lines = new List<string>();
+        var enumerator = CreateDeviceEnumerator();
+        try
+        {
+            string? defaultId = null;
+            if (enumerator.GetDefaultAudioEndpoint(0, 0, out var def) >= 0)
+            {
+                defaultId = DeviceId(def);
+                Marshal.ReleaseComObject(def);
+            }
+
+            Mf.Check(enumerator.EnumAudioEndpoints(0, 1, out var devices));
+            try
+            {
+                Mf.Check(devices.GetCount(out int count));
+                for (int i = 0; i < count; i++)
+                {
+                    if (devices.Item(i, out var device) < 0)
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        var id = DeviceId(device);
+                        var pids = new List<string>();
+                        var mgrIid = IID_IAudioSessionManager2;
+                        if (device.Activate(ref mgrIid, 23, IntPtr.Zero, out var mgrPtr) >= 0)
+                        {
+                            var manager = (IAudioSessionManager2)Marshal.GetObjectForIUnknown(mgrPtr);
+                            Marshal.Release(mgrPtr);
+                            try
+                            {
+                                if (manager.GetSessionEnumerator(out var sessions) >= 0)
+                                {
+                                    Mf.Check(sessions.GetCount(out int sessionCount));
+                                    for (int s = 0; s < sessionCount; s++)
+                                    {
+                                        if (sessions.GetSession(s, out var session) < 0)
+                                        {
+                                            continue;
+                                        }
+
+                                        if (session is IAudioSessionControl2 details
+                                            && details.GetProcessId(out uint owner) >= 0)
+                                        {
+                                            string name;
+                                            try
+                                            {
+                                                using var p = System.Diagnostics.Process.GetProcessById((int)owner);
+                                                name = p.ProcessName;
+                                            }
+                                            catch
+                                            {
+                                                name = "?";
+                                            }
+
+                                            pids.Add($"{owner}({name})");
+                                        }
+
+                                        Marshal.ReleaseComObject(session);
+                                    }
+
+                                    Marshal.ReleaseComObject(sessions);
+                                }
+                            }
+                            finally
+                            {
+                                Marshal.ReleaseComObject(manager);
+                            }
+                        }
+
+                        lines.Add($"{(id == defaultId ? "DEFAULT " : "        ")}{id?[^12..]}: {string.Join(", ", pids)}");
+                    }
+                    finally
+                    {
+                        Marshal.ReleaseComObject(device);
+                    }
+                }
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(devices);
+            }
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(enumerator);
+        }
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private static string? DeviceId(IMMDevice device)
+    {
+        if (device.GetId(out var idPtr) < 0 || idPtr == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        var id = Marshal.PtrToStringUni(idPtr);
+        Marshal.FreeCoTaskMem(idPtr);
+        return id;
+    }
+
+    private static bool HasSessionFor(IMMDevice device, int pid)
+    {
+        var mgrIid = IID_IAudioSessionManager2;
+        if (device.Activate(ref mgrIid, 23 /* CLSCTX_ALL */, IntPtr.Zero, out var mgrPtr) < 0)
+        {
+            return false;
+        }
+
+        var manager = (IAudioSessionManager2)Marshal.GetObjectForIUnknown(mgrPtr);
+        Marshal.Release(mgrPtr);
+        try
+        {
+            if (manager.GetSessionEnumerator(out var sessions) < 0)
+            {
+                return false;
+            }
+
+            try
+            {
+                Mf.Check(sessions.GetCount(out int count));
+                for (int i = 0; i < count; i++)
+                {
+                    if (sessions.GetSession(i, out var session) < 0)
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        if (session is IAudioSessionControl2 details
+                            && details.GetProcessId(out uint owner) >= 0 && owner == (uint)pid)
+                        {
+                            return true;
+                        }
+                    }
+                    finally
+                    {
+                        Marshal.ReleaseComObject(session);
+                    }
+                }
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(sessions);
+            }
+
+            return false;
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(manager);
         }
     }
 
@@ -459,16 +739,75 @@ internal sealed class AudioLoopback : IDisposable
         [PreserveSig] int GetNextPacketSize(out uint frames);
     }
 
+    private static readonly Guid IID_IAudioSessionManager2 = new("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F");
+
     [ComImport]
     [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6")]
     [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IMMDeviceEnumerator
     {
-        [PreserveSig] int EnumAudioEndpoints(int dataFlow, uint stateMask, out IntPtr devices);
+        [PreserveSig] int EnumAudioEndpoints(int dataFlow, uint stateMask, out IMMDeviceCollection devices);
         [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice device);
         [PreserveSig] int GetDevice(string id, out IntPtr device);
         [PreserveSig] int RegisterEndpointNotificationCallback(IntPtr client);
         [PreserveSig] int UnregisterEndpointNotificationCallback(IntPtr client);
+    }
+
+    [ComImport]
+    [Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IMMDeviceCollection
+    {
+        [PreserveSig] int GetCount(out int count);
+        [PreserveSig] int Item(int index, out IMMDevice device);
+    }
+
+    [ComImport]
+    [Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IAudioSessionManager2
+    {
+        // IAudioSessionManager
+        [PreserveSig] int _GetAudioSessionControl();
+        [PreserveSig] int _GetSimpleAudioVolume();
+        // IAudioSessionManager2
+        [PreserveSig] int GetSessionEnumerator(out IAudioSessionEnumerator sessions);
+        [PreserveSig] int _RegisterSessionNotification();
+        [PreserveSig] int _UnregisterSessionNotification();
+        [PreserveSig] int _RegisterDuckNotification();
+        [PreserveSig] int _UnregisterDuckNotification();
+    }
+
+    [ComImport]
+    [Guid("E2F5BB11-0570-40CA-ACDD-3AA01277DEE8")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IAudioSessionEnumerator
+    {
+        [PreserveSig] int GetCount(out int count);
+        [PreserveSig] int GetSession(int index, [MarshalAs(UnmanagedType.IUnknown)] out object session);
+    }
+
+    [ComImport]
+    [Guid("BFB7FF88-7239-4FC9-8FA2-07C950BE9C6D")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IAudioSessionControl2
+    {
+        // IAudioSessionControl — stubs hold the vtable slots, never called.
+        [PreserveSig] int _GetState();
+        [PreserveSig] int _GetDisplayName();
+        [PreserveSig] int _SetDisplayName();
+        [PreserveSig] int _GetIconPath();
+        [PreserveSig] int _SetIconPath();
+        [PreserveSig] int _GetGroupingParam();
+        [PreserveSig] int _SetGroupingParam();
+        [PreserveSig] int _RegisterAudioSessionNotification();
+        [PreserveSig] int _UnregisterAudioSessionNotification();
+        // IAudioSessionControl2
+        [PreserveSig] int _GetSessionIdentifier();
+        [PreserveSig] int _GetSessionInstanceIdentifier();
+        [PreserveSig] int GetProcessId(out uint pid);
+        [PreserveSig] int _IsSystemSoundsSession();
+        [PreserveSig] int _SetDuckingPreference();
     }
 
     [ComImport]

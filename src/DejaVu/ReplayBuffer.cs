@@ -37,7 +37,6 @@ internal sealed class ReplayBuffer : IDisposable
     private bool manuallyPaused;
     private bool audioWarned;
     private int zeroFrameStreak;
-    private string? lastAudioDesc;
 
 
     public ReplayBuffer(AppConfig config, int segmentSeconds = 60)
@@ -406,67 +405,74 @@ internal sealed class ReplayBuffer : IDisposable
             return;
         }
 
-        string? path;
-        IntPtr window;
-        lock (gate)
+        // Restart churn (saves, retargets, resizes) can swap the segment paths while a
+        // device is still activating. Discarding and giving up left whole sessions
+        // silently audio-less in the field — retry against the fresh path instead.
+        for (int attempt = 0; attempt < 3; attempt++)
         {
-            if (!running)
+            string? path;
+            IntPtr window;
+            lock (gate)
             {
-                return;
+                if (!running)
+                {
+                    return;
+                }
+
+                path = currentAudioPath;
+                window = engineWindow;
             }
 
-            path = currentAudioPath;
-            window = engineWindow;
-        }
-
-        // App-only mode needs a single process: the captured window's. Monitor and auto
-        // targets fall back to the usual mix-minus-exclusions. Which path runs decides
-        // which audio device family is in play, so log it when it changes — an audio bug
-        // report is unreadable without knowing which capture the session used.
-        AudioLoopback? audio;
-        string desc;
-        if (config.AppAudioOnly && window != IntPtr.Zero)
-        {
-            int pid = ResolveAudioPid(window);
-            desc = $"app-only (pid {pid})";
-            audio = AudioLoopback.TryStart(path!, pid, includeOnly: true);
-        }
-        else
-        {
-            int exclude = FindExcludePid();
-            desc = exclude > 0 ? $"system mix excluding pid {exclude}" : "full system mix";
-            audio = AudioLoopback.TryStart(path!, exclude);
-        }
-
-        bool warn;
-        lock (gate)
-        {
-            // A Stop/Restart may have won the race while the device was activating.
-            if (!running || currentAudioPath != path)
+            // App-only mode needs a single process: the captured window's. Monitor and
+            // auto targets fall back to the usual mix-minus-exclusions.
+            AudioLoopback? audio;
+            if (config.AppAudioOnly && window != IntPtr.Zero)
             {
-                audio?.Dispose();
-                return;
+                audio = AudioLoopback.TryStart(path!, ResolveAudioPid(window), includeOnly: true);
+            }
+            else
+            {
+                audio = AudioLoopback.TryStart(path!, FindExcludePid());
             }
 
-            currentAudio = audio;
-            if (desc != lastAudioDesc)
+            bool warn;
+            lock (gate)
             {
-                lastAudioDesc = desc;
-                AppLog.Write("audio: " + desc);
+                if (!running)
+                {
+                    audio?.Dispose();
+                    return;
+                }
+
+                if (currentAudioPath != path)
+                {
+                    // A restart won the race; this capture belongs to a dead segment.
+                    audio?.Dispose();
+                    continue;
+                }
+
+                currentAudio = audio;
+                warn = audio is null && !audioWarned;
+                if (warn)
+                {
+                    audioWarned = true;
+                }
             }
 
-            warn = audio is null && !audioWarned;
+            // Every segment start, on purpose: audio bug reports are unreadable
+            // without knowing which route each session actually used.
+            AppLog.Write("audio: " + (audio?.Route ?? "none"));
+
             if (warn)
             {
-                audioWarned = true;
+                AppLog.Write("audio capture failed to start");
+                Failed?.Invoke("Audio capture failed; replays will be silent.");
             }
+
+            return;
         }
 
-        if (warn)
-        {
-            AppLog.Write("audio capture failed to start");
-            Failed?.Invoke("Audio capture failed; replays will be silent.");
-        }
+        AppLog.Write("audio: gave up after restart churn");
     }
 
     /// <summary>The PID whose process tree renders the captured window's audio. UWP

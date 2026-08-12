@@ -89,12 +89,13 @@ internal sealed class AppConfig
     public string[] AudioExclude { get; set; } = DefaultAudioExclude;
 
     /// <summary>
-    /// When capturing a window, record only that app's process-tree audio instead of the
-    /// system mix. Keeps virtual-mixer re-renders (SteelSeries Sonar routes the mic
-    /// through one) and every other app out of clips by construction. Monitor and auto
-    /// capture have no single process, so they keep the system mix.
+    /// When capturing a window, record that app's audio instead of the system mix —
+    /// via the app's own output device when a virtual mixer (SteelSeries Sonar) routes
+    /// it there, else via include-mode process loopback. On by default: pointing the
+    /// capture at a game and getting some other mix is the surprise, not the feature.
+    /// Monitor and auto capture have no single process, so they keep the system mix.
     /// </summary>
-    public bool AppAudioOnly { get; set; }
+    public bool AppAudioOnly { get; set; } = true;
 
     /// <summary>Chime on save. Balloons are suppressed while a game runs; sound is the
     /// only confirmation a fullscreen player gets.</summary>
@@ -205,7 +206,7 @@ internal sealed class AppConfig
                         config.AudioExclude = file.AudioExclude;
                     }
 
-                    config.AppAudioOnly = file.AppAudioOnly ?? false;
+                    config.AppAudioOnly = file.AppAudioOnly ?? true;
                     config.SaveSound = file.SaveSound ?? true;
                     config.UpdateNotify = file.UpdateNotify ?? false;
 
