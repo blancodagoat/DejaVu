@@ -5,6 +5,21 @@ namespace DejaVu;
 /// <summary>Win32 interop for hotkeys, the single-instance signal and the indicator overlay.</summary>
 internal static class Native
 {
+    /// <summary>
+    /// Pins d3d11/dxgi imports to the System32 copies. Game folders often hold shim
+    /// versions of these DLLs (ReShade, dxvk, ENB), and the default search order loads
+    /// them from the exe's own folder first — the shim lacks the WinRT interop exports
+    /// and capture dies with EntryPointNotFound (issue #2). Call before any capture.
+    /// </summary>
+    public static void PinSystemDlls()
+    {
+        NativeLibrary.SetDllImportResolver(typeof(Native).Assembly, (name, _, _) =>
+            name.Equals("d3d11.dll", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("dxgi.dll", StringComparison.OrdinalIgnoreCase)
+                ? NativeLibrary.Load(Path.Combine(Environment.SystemDirectory, name))
+                : IntPtr.Zero);
+    }
+
     public const int WM_HOTKEY = 0x0312;
     public const int WM_KEYUP = 0x0101;
     public const int WM_SYSKEYUP = 0x0105;

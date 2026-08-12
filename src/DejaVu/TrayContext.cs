@@ -64,6 +64,7 @@ internal sealed class TrayContext : ApplicationContext
         // Force handle creation so background threads can marshal onto the UI thread
         // through it even while the indicator is hidden.
         _ = indicator.Handle;
+        indicator.UseIcon = config.IndicatorStyle == "icon";
         if (config.ShowIndicator)
         {
             indicator.Show();
@@ -148,18 +149,26 @@ internal sealed class TrayContext : ApplicationContext
 
         menu.Items.Add(Toggle("System audio", () => config.SystemAudio,
             v => { config.SystemAudio = v; buffer.Restart(); }));
-        menu.Items.Add(Toggle("Corner indicator", () => config.ShowIndicator, v =>
-        {
-            config.ShowIndicator = v;
-            if (v)
+        menu.Items.Add(Choice("Corner indicator", new[] { "Off", "Red dot", "App icon" }, s => s,
+            () => !config.ShowIndicator ? "Off" : config.IndicatorStyle == "icon" ? "App icon" : "Red dot",
+            s =>
             {
-                indicator.Show();
-            }
-            else
-            {
-                indicator.Hide();
-            }
-        }));
+                config.ShowIndicator = s != "Off";
+                if (s != "Off")
+                {
+                    config.IndicatorStyle = s == "App icon" ? "icon" : "dot";
+                }
+
+                indicator.UseIcon = config.IndicatorStyle == "icon";
+                if (config.ShowIndicator)
+                {
+                    indicator.Show();
+                }
+                else
+                {
+                    indicator.Hide();
+                }
+            }));
 
         var updates = new ToolStripMenuItem("Check for updates");
         updates.Click += async (_, _) =>

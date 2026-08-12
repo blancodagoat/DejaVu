@@ -5,6 +5,8 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
+        Native.PinSystemDlls();
+
         using var instance = SingleInstance.Acquire();
         if (!instance.IsFirstInstance)
         {

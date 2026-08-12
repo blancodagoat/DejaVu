@@ -11,6 +11,10 @@
 
 using DejaVu;
 
+// Same pinning the app does in Main: d3d11/dxgi resolve from System32 even when a
+// shim copy sits beside the exe. The "probe" child below proves it.
+Native.PinSystemDlls();
+
 int failed = 0, passed = 0;
 
 void Check(string name, bool ok, string? detail = null)
@@ -59,6 +63,12 @@ if (args.Length > 0 && args[0] == "soakrecord")
     rec.Start();
     Console.WriteLine("      soakrecord: buffering until killed");
     Thread.Sleep(Timeout.Infinite);
+}
+
+// Decoy probe child: exit 0 when capture delivers frames; used by the shadowed-DLL test.
+if (args.Length > 0 && args[0] == "probe")
+{
+    return DesktopDeliversFrames() ? 0 : 3;
 }
 
 // Crash-kill soak: N cycles of record in a child process -> hard-kill mid-write at a
@@ -427,6 +437,23 @@ if (args.Length > 0 && args[0] == "smoke")
         Console.WriteLine("SKIP smoke: the desktop is not delivering frames (screen locked or asleep).");
         Console.WriteLine($"{passed} passed, {failed} failed");
         return failed == 0 ? 0 : 1;
+    }
+
+    // A d3d11.dll shim beside the exe (ReShade, dxvk, ENB) must not break capture: the
+    // resolver pins system DLLs to System32 (issue #2). version.dll is a real PE that
+    // exports none of the d3d11 surface, so an unpinned probe dies on it.
+    var decoy = Path.Combine(AppContext.BaseDirectory, "d3d11.dll");
+    try
+    {
+        File.Copy(Path.Combine(Environment.SystemDirectory, "version.dll"), decoy, overwrite: true);
+        using var shadowProbe = System.Diagnostics.Process.Start(Environment.ProcessPath!, "probe");
+        bool exited = shadowProbe!.WaitForExit(60_000);
+        Check("capture survives a shadowing d3d11.dll", exited && shadowProbe.ExitCode == 0,
+            exited ? $"probe exit {shadowProbe.ExitCode}" : "probe hung");
+    }
+    finally
+    {
+        try { File.Delete(decoy); } catch { }
     }
 
     var config = new AppConfig
