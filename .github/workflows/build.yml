@@ -43,3 +43,27 @@ jobs:
           gh api -X DELETE "repos/$env:GITHUB_REPOSITORY/git/refs/tags/$env:TAG"
           if ($LASTEXITCODE -ne 0) { "tag ref already absent" }
           gh release create $env:TAG publish/framework-dependent/DejaVu.exe DejaVu-self-contained.exe --target $env:GITHUB_SHA --generate-notes
+
+      - name: Submit to winget-pkgs
+        # Lives here rather than in a release-triggered workflow: releases created with
+        # GITHUB_TOKEN never fire other workflows, by GitHub's recursion rule. One-time
+        # setup: a WINGET_TOKEN secret (classic PAT, public_repo scope) and an initial
+        # `wingetcreate new` submission of blancodagoat.DejaVu; from then on every tag
+        # auto-submits the update.
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if (-not $env:WINGET_TOKEN) { Write-Host "WINGET_TOKEN secret not set; skipping."; exit 0 }
+          $version = $env:TAG.TrimStart("v")
+          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          $out = ./wingetcreate.exe update blancodagoat.DejaVu --version $version `
+            --urls "https://github.com/blancodagoat/DejaVu/releases/download/$($env:TAG)/DejaVu.exe" `
+            --submit --token $env:WINGET_TOKEN 2>&1
+          $out | Write-Host
+          if ($LASTEXITCODE -ne 0 -and "$out" -match "does not exist|not found") {
+            Write-Host "Package not in winget-pkgs yet (initial submission still in review); skipping."
+            exit 0
+          }
+          exit $LASTEXITCODE
