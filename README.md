@@ -10,6 +10,8 @@
 
 `one exe` · `any GPU` · `no account` · `no uploads` · `no telemetry`
 
+<img src="assets/screenshot.png" width="760" alt="The Replay recovered notification: a crashed session's buffer saved as a clip on the next launch">
+
 </div>
 
 ---

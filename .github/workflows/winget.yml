@@ -1,0 +1,26 @@
+# Submits each tagged release to microsoft/winget-pkgs, so `winget install DejaVu`
+# stays current with zero clicks. Two one-time prerequisites:
+#   1. A classic PAT with the public_repo scope, saved as the WINGET_TOKEN repo secret.
+#   2. The package must already exist in winget-pkgs; submit the first version once with
+#      `wingetcreate new https://github.com/blancodagoat/DejaVu/releases/download/v1.0.0/DejaVu.exe`
+#      (id: blancodagoat.DejaVu). After that PR merges, this workflow handles every update.
+# The rolling "latest" release is ignored: winget needs immutable versioned URLs.
+name: winget
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    if: startsWith(github.event.release.tag_name, 'v')
+    runs-on: windows-latest
+    steps:
+      - name: Submit version update to winget-pkgs
+        run: |
+          $tag = "${{ github.event.release.tag_name }}"
+          $version = $tag.TrimStart("v")
+          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          ./wingetcreate.exe update blancodagoat.DejaVu --version $version `
+            --urls "https://github.com/blancodagoat/DejaVu/releases/download/$tag/DejaVu.exe" `
+            --submit --token "${{ secrets.WINGET_TOKEN }}"
