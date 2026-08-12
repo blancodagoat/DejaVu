@@ -4,7 +4,7 @@
     "homepage": "https://github.com/blancodagoat/DejaVu",
     "license": "MIT",
     "url": "https://github.com/blancodagoat/DejaVu/releases/download/v1.1.0/DejaVu.exe",
-    "hash": "FILL-AFTER-FIRST-TAGGED-RELEASE (scoop hash DejaVu.exe)",
+    "hash": "723954a2e4603fdac2c688123df0659b140a60da7f61d265ea20f56bdd88af7e",
     "bin": "DejaVu.exe",
     "shortcuts": [
         [
