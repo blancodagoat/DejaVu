@@ -182,6 +182,8 @@ internal sealed class TrayContext : ApplicationContext
         // re-rendering the mic into an exclude-mode mix. No effect on monitor capture.
         menu.Items.Add(Toggle("Captured app audio only", () => config.AppAudioOnly,
             v => { config.AppAudioOnly = v; buffer.Restart(); }));
+        menu.Items.Add(Toggle("Save sound", () => config.SaveSound,
+            v => config.SaveSound = v));
         menu.Items.Add(Choice("Corner indicator", new[] { "Off", "Red dot", "App icon" }, s => s,
             () => !config.ShowIndicator ? "Off" : config.IndicatorStyle == "icon" ? "App icon" : "Red dot",
             s =>
@@ -455,6 +457,11 @@ internal sealed class TrayContext : ApplicationContext
             {
                 var path = buffer.Save(appName);
                 AppLog.Write($"saved {Path.GetFileName(path)} ({new FileInfo(path).Length / 1024 / 1024} MB)");
+                if (config.SaveSound)
+                {
+                    SaveChime.Success();
+                }
+
                 OnUi(() =>
                 {
                     lastSaved = path;
@@ -464,6 +471,11 @@ internal sealed class TrayContext : ApplicationContext
             catch (Exception ex)
             {
                 AppLog.Write("save failed: " + ex.Message);
+                if (config.SaveSound)
+                {
+                    SaveChime.Failure();
+                }
+
                 OnUi(() => FailureBalloon("Save failed", ex.Message, ToolTipIcon.Error));
             }
             finally
