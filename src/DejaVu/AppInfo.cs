@@ -5,12 +5,18 @@ internal static class AppInfo
     public const string Name = "DejaVu";
     public const string GitHubUrl = "https://github.com/blancodagoat/dejavu";
 
+    private static string? renamedTo;
+
+    /// <summary>SelfTidy renamed the running exe; ProcessPath keeps reporting the old
+    /// name, and autostart repair would re-point at a file that no longer exists.</summary>
+    public static void NoteRenamed(string path) => renamedTo = path;
+
     /// <summary>
     /// Full path of the running executable. ProcessPath is the only reliable source under
     /// single-file publish, where Assembly.Location is empty.
     /// </summary>
     public static string ExecutablePath =>
-        Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, Name + ".exe");
+        renamedTo ?? Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, Name + ".exe");
 
     /// <summary>
     /// GetFolderPath returns "" when a known folder is unregistered (stripped images,

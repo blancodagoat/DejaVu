@@ -233,6 +233,12 @@ Eq("username scrubbed at word boundaries",
 Eq("two-letter username left alone",
     IssueReport.Scrub("PC restarted", @"C:\Users\PC", "PC"), "PC restarted");
 
+// Download-copy suffix stripping ("DejaVu (2).exe" from browser re-downloads).
+Eq("copy suffix stripped", SelfTidy.StripCopySuffix("DejaVu (3)"), "DejaVu");
+Eq("clean name untouched", SelfTidy.StripCopySuffix("DejaVu"), "DejaVu");
+Eq("inner parentheses survive", SelfTidy.StripCopySuffix("My (old) App (2)"), "My (old) App");
+Eq("parens without space are not a copy suffix", SelfTidy.StripCopySuffix("App(1)"), "App(1)");
+
 // Clip naming
 Eq("exe name sanitised", SourceApp.Sanitise("Overwatch 2.exe"), "overwatch-2");
 Eq("path stripped", SourceApp.Sanitise(@"C:\Games\RocketLeague.exe"), "rocketleague");
