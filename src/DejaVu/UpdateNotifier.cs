@@ -17,7 +17,11 @@ internal static class ScoopInstall
     public static bool Active =>
         AppInfo.ExecutablePath.Contains(@"\scoop\apps\", StringComparison.OrdinalIgnoreCase);
 
-    public static string UpdateCommand => "scoop update " + AppInfo.Name.ToLowerInvariant();
+    // Two commands on purpose: "scoop update <app>" alone compares against the
+    // LOCAL bucket clone and happily reports a stale version as latest — the bare
+    // "scoop update" first is what actually pulls the buckets.
+    public static string UpdateCommand =>
+        "scoop update; scoop update " + AppInfo.Name.ToLowerInvariant();
 }
 
 internal sealed class UpdateNotifier : IDisposable
