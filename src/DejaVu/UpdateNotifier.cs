@@ -22,6 +22,23 @@ internal static class ScoopInstall
     // "scoop update" first is what actually pulls the buckets.
     public static string UpdateCommand =>
         "scoop update; scoop update " + AppInfo.Name.ToLowerInvariant();
+
+    /// <summary>
+    /// Runs the whole update in a visible terminal and relaunches the app when done.
+    /// The relaunch passes this pid as --takeover so the new instance waits out our
+    /// shutdown instead of concluding "already running" and exiting. The caller must
+    /// quit the app right after. The exe path survives the update: scoop swaps the
+    /// "current" junction underneath it.
+    /// </summary>
+    public static void RunUpdateAndRelaunch()
+    {
+        var relaunch = $"Start-Process '{AppInfo.ExecutablePath}' -ArgumentList '--takeover {Environment.ProcessId}'";
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+            "powershell.exe", $"-NoProfile -Command \"{UpdateCommand}; {relaunch}\"")
+        {
+            UseShellExecute = true,
+        });
+    }
 }
 
 internal sealed class UpdateNotifier : IDisposable

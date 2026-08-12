@@ -583,12 +583,12 @@ internal sealed class TrayContext : ApplicationContext
         if (ScoopInstall.Active)
         {
             Balloon("Update available",
-                $"{AppInfo.Name} v{version} is out — click to copy \"{ScoopInstall.UpdateCommand}\".",
+                $"{AppInfo.Name} v{version} is out — click to update and restart now.",
                 ToolTipIcon.Info);
             pendingUpdate = () =>
             {
-                Clipboard.SetText(ScoopInstall.UpdateCommand);
-                Balloon("Copied", $"Paste \"{ScoopInstall.UpdateCommand}\" into a terminal.", ToolTipIcon.None);
+                ScoopInstall.RunUpdateAndRelaunch();
+                ExitThread();
             };
         }
         else
