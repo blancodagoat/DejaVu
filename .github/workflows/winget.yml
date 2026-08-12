@@ -26,6 +26,12 @@ jobs:
           if (-not $env:WINGET_TOKEN) { Write-Host "WINGET_TOKEN secret not set; skipping submission."; exit 0 }
           $version = $env:TAG.TrimStart("v")
           Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
-          ./wingetcreate.exe update blancodagoat.DejaVu --version $version `
+          $out = ./wingetcreate.exe update blancodagoat.DejaVu --version $version `
             --urls "https://github.com/blancodagoat/DejaVu/releases/download/$($env:TAG)/DejaVu.exe" `
-            --submit --token $env:WINGET_TOKEN
+            --submit --token $env:WINGET_TOKEN 2>&1
+          $out | Write-Host
+          if ($LASTEXITCODE -ne 0 -and "$out" -match "does not exist|not found") {
+            Write-Host "Package not in winget-pkgs yet (initial submission still in review); skipping."
+            exit 0
+          }
+          exit $LASTEXITCODE

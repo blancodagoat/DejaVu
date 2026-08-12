@@ -52,7 +52,7 @@ That's the entire app. There is no main window and nothing to set up; every sett
 | System audio | On or off. The mic is never recorded |
 | Clip folder cap | Off / 10 / 25 / 50 GB |
 | Hotkey | Click-to-rebind dialog |
-| Corner dot | On or off. It's click-through and never appears in your clips |
+| Corner indicator | Off, the red dot, or the app icon. Click-through and never appears in your clips |
 
 > **Admin games:** if the hotkey stops working while a game with anti-cheat has focus, hit *Restart as administrator* in the tray once. That's a Windows rule, not ours.
 
@@ -127,7 +127,7 @@ DejaVu is built for roughly 2015 machines and up:
 | `%APPDATA%\DejaVu\config.json` | all settings (broken values repair themselves to defaults) |
 | `%LOCALAPPDATA%\DejaVu\buffer` | the rolling buffer |
 
-Config keys: `bufferMinutes` (5 to 25) · `quality` · `fps` · `saveHotkey` · `saveRoot` · `captureTarget` (`"auto"` or `\\.\DISPLAY2`) · `showIndicator` · `systemAudio` · `clipCapGB` · `audioExclude`
+Config keys: `bufferMinutes` (5 to 25) · `quality` · `fps` · `saveHotkey` · `saveRoot` · `captureTarget` (`"auto"` or `\\.\DISPLAY2`) · `showIndicator` · `indicatorStyle` (`"dot"` or `"icon"`) · `systemAudio` · `clipCapGB` · `audioExclude`
 
 </details>
 

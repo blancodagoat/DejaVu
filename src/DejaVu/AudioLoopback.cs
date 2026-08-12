@@ -44,8 +44,11 @@ internal sealed class AudioLoopback : IDisposable
         {
             return new AudioLoopback(outputPath, excludePid);
         }
-        catch
+        catch (Exception ex)
         {
+            // The reason must reach the log: a silent audio failure in the field is
+            // undiagnosable from "my clips have no sound".
+            AppLog.Write("audio unavailable: " + ex.Message);
             return null;
         }
     }

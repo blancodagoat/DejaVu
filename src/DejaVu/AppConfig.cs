@@ -19,6 +19,7 @@ internal sealed class ConfigFile
     public string? SaveHotkey { get; set; }
     public string? SaveRoot { get; set; }
     public bool? ShowIndicator { get; set; }
+    public string? IndicatorStyle { get; set; }
     public bool? SystemAudio { get; set; }
     public int? ClipCapGB { get; set; }
     public string? CaptureTarget { get; set; }
@@ -59,6 +60,9 @@ internal sealed class AppConfig
     public string SaveRoot { get; set; } = AppInfo.DefaultSaveRoot;
 
     public bool ShowIndicator { get; set; } = true;
+
+    /// <summary>"dot" (the red dot) or "icon" (the app icon) for the corner indicator.</summary>
+    public string IndicatorStyle { get; set; } = "dot";
 
     public bool SystemAudio { get; set; } = true;
 
@@ -157,6 +161,7 @@ internal sealed class AppConfig
                     }
 
                     config.ShowIndicator = file.ShowIndicator ?? true;
+                    config.IndicatorStyle = file.IndicatorStyle is "dot" or "icon" ? file.IndicatorStyle : "dot";
                     config.SystemAudio = file.SystemAudio ?? true;
                     config.ClipCapGB = Math.Max(0, file.ClipCapGB ?? 0);
                     config.CaptureTarget = string.IsNullOrWhiteSpace(file.CaptureTarget)
@@ -166,7 +171,7 @@ internal sealed class AppConfig
                         config.AudioExclude = file.AudioExclude;
                     }
 
-                    rewrite |= file.ShowIndicator is null || file.SystemAudio is null
+                    rewrite |= file.ShowIndicator is null || file.IndicatorStyle is null || file.SystemAudio is null
                         || file.ClipCapGB is null || file.CaptureTarget is null
                         || file.AudioExclude is null;
                 }
@@ -198,6 +203,7 @@ internal sealed class AppConfig
                 SaveHotkey = SaveHotkey.ToString(),
                 SaveRoot = SaveRoot,
                 ShowIndicator = ShowIndicator,
+                IndicatorStyle = IndicatorStyle,
                 SystemAudio = SystemAudio,
                 ClipCapGB = ClipCapGB,
                 CaptureTarget = CaptureTarget,
