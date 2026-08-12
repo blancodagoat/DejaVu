@@ -71,6 +71,69 @@ if (args.Length > 0 && args[0] == "probe")
     return DesktopDeliversFrames() ? 0 : 3;
 }
 
+// Apartment regression: start via ReplayBuffer on an STA thread (exactly what a tray
+// menu click does), stop from MTA (the cycle timer). Raw CaptureEngine used this way
+// dies with E_NOINTERFACE / "separated RCW" — MF objects don't aggregate the
+// free-threaded marshaler — so ReplayBuffer must confine engine work to MTA.
+if (args.Length > 0 && args[0] == "apartment")
+{
+    if (Directory.Exists(AppInfo.BufferDirectory) &&
+        Directory.EnumerateFiles(AppInfo.BufferDirectory).Any())
+    {
+        Console.WriteLine("REFUSING apartment: the buffer directory is in use — stop DejaVu first.");
+        return 2;
+    }
+
+    var cfg = SoakConfig();
+    Directory.CreateDirectory(cfg.SaveRoot);
+    using var rb = new ReplayBuffer(cfg, segmentSeconds: 4);
+    Exception? staError = null;
+    var sta = new Thread(() => { try { rb.Start(); } catch (Exception ex) { staError = ex; } });
+    sta.SetApartmentState(ApartmentState.STA);
+    sta.Start();
+    sta.Join();     // the STA apartment is torn down here — MTA-confined RCWs must survive it
+    if (staError is not null)
+    {
+        Console.WriteLine("apartment isolation FAILED at start: " + staError.Message);
+        return 3;
+    }
+
+    Thread.Sleep(6000); // spans one 4 s rotation: Rotate + Finalize must also survive
+    try
+    {
+        rb.Stop();
+        Console.WriteLine("apartment isolation: OK");
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine("apartment isolation FAILED at stop: " + ex.Message);
+        return 3;
+    }
+}
+
+// Field diagnosis: can Media Foundation open and decode this file on this machine?
+if (args.Length > 1 && args[0] == "probefile")
+{
+    try
+    {
+        int open = Mf.MFCreateSourceReaderFromURL(args[1], IntPtr.Zero, out var reader);
+        Console.WriteLine($"source reader open: 0x{open:X8}");
+        if (open >= 0)
+        {
+            System.Runtime.InteropServices.Marshal.ReleaseComObject(reader);
+            var probe = Mf.ProbeVideo(args[1], maxSamples: 3);
+            Console.WriteLine($"decode probe: {probe.Frames} frames");
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine("probe failed: " + ex.Message);
+    }
+
+    return 0;
+}
+
 // Crash-kill soak: N cycles of record in a child process -> hard-kill mid-write at a
 // random moment -> recover -> decode-probe the recovered clip. This is the automated
 // version of "killing the power mid-write still leaves playable files" (minus the OS

@@ -341,6 +341,9 @@ internal sealed class CaptureEngine : IDisposable
             if (!errored)
             {
                 errored = true;
+                // Full stack into the log: the field failures here are COM cast/RCW
+                // exceptions whose message alone cannot say WHICH call site died.
+                AppLog.Write($"engine error detail ({stage}): {ex}");
                 Error?.Invoke($"{stage}: {ex.Message}");
             }
         }
