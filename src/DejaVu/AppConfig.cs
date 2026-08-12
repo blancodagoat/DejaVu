@@ -76,12 +76,14 @@ internal sealed class AppConfig
     /// <summary>True when no config existed on disk — the app's very first launch.</summary>
     public bool FirstRun { get; private set; }
 
+    public static readonly string[] DefaultAudioExclude = ["Discord", "DiscordCanary", "DiscordPTB", "Vesktop"];
+
     /// <summary>
     /// Process names whose audio stays out of replays. The first one found running has
     /// its whole process tree excluded from the loopback mix — voice chat, notification
     /// pings, everything. Empty list = capture the full system mix.
     /// </summary>
-    public string[] AudioExclude { get; set; } = ["Discord", "DiscordCanary", "DiscordPTB", "Vesktop"];
+    public string[] AudioExclude { get; set; } = DefaultAudioExclude;
 
     /// <summary>
     /// Constant-quality target (1–100) for the encoder's quality rate-control mode.

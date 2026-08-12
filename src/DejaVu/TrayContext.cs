@@ -149,6 +149,11 @@ internal sealed class TrayContext : ApplicationContext
 
         menu.Items.Add(Toggle("System audio", () => config.SystemAudio,
             v => { config.SystemAudio = v; buffer.Restart(); }));
+        // The simple path to the audioExclude config list. Toggling on resets any
+        // hand-customized list back to the Discord defaults; the config key remains
+        // the place for custom exclusions.
+        menu.Items.Add(Toggle("Keep Discord out of clips", () => config.AudioExclude.Length > 0,
+            v => { config.AudioExclude = v ? AppConfig.DefaultAudioExclude : []; buffer.Restart(); }));
         menu.Items.Add(Choice("Corner indicator", new[] { "Off", "Red dot", "App icon" }, s => s,
             () => !config.ShowIndicator ? "Off" : config.IndicatorStyle == "icon" ? "App icon" : "Red dot",
             s =>
