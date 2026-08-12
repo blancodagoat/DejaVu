@@ -50,6 +50,7 @@ That's the entire app. There is no main window and nothing to set up; every sett
 | Quality | Low / Medium / High. Constant-quality encoding: action gets the bits, menus cost almost nothing |
 | Frame rate | 30 to 240 fps, offered up to what your display can actually show |
 | System audio | On or off. The mic is never recorded |
+| Keep Discord out of clips | On by default; one click puts voice chat back into the mix |
 | Clip folder cap | Off / 10 / 25 / 50 GB |
 | Hotkey | Click-to-rebind dialog |
 | Corner indicator | Off, the red dot, or the app icon. Click-through and never appears in your clips |
