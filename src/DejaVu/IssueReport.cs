@@ -57,9 +57,14 @@ internal static class IssueReport
             text = text.Replace(userProfile, "~", StringComparison.OrdinalIgnoreCase);
         }
 
-        if (userName.Length > 0)
+        // Word-bounded, and only for names that are unlikely to be ordinary words:
+        // a username like "PC" or "user" used to shred every unrelated occurrence in
+        // the log. The profile-path replace above already caught the path form.
+        if (userName.Length >= 3)
         {
-            text = text.Replace(userName, "<user>", StringComparison.OrdinalIgnoreCase);
+            text = System.Text.RegularExpressions.Regex.Replace(
+                text, $@"\b{System.Text.RegularExpressions.Regex.Escape(userName)}\b", "<user>",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         }
 
         return text;

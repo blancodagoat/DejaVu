@@ -200,6 +200,39 @@ Eq("selection is oldest-first",
 Eq("empty buffer selects nothing",
     ReplayBuffer.SelectSegments([], now, TimeSpan.FromMinutes(5), 60).Count, 0);
 
+// Clock jumps: after DST fall-back the freshest segments are "future"; after a
+// forward NTP jump they all look ancient. Neither may cost the user their footage.
+var fellBack = new (string Path, DateTime Start)[]
+{
+    ("stale", now.AddMinutes(-70)),   // genuinely old
+    ("f1", now.AddMinutes(58)),       // written just before the clock fell back
+    ("f2", now.AddMinutes(59)),
+    ("g", now),                       // first post-jump segment
+};
+Eq("backward clock jump keeps both time domains",
+    string.Join(",", ReplayBuffer.SelectSegments(fellBack, now, TimeSpan.FromMinutes(5), 60)), "g,f1,f2");
+
+var jumpedForward = new (string Path, DateTime Start)[]
+{
+    ("h1", now.AddMinutes(-125)),
+    ("h2", now.AddMinutes(-122)),     // clock then jumped two hours ahead
+};
+Eq("forward clock jump keeps the real footage",
+    string.Join(",", ReplayBuffer.SelectSegments(jumpedForward, now, TimeSpan.FromMinutes(5), 60)), "h1,h2");
+
+// Encoder frame-size fitting: even alignment (drag-resized windows), per-codec
+// ceilings (ultrawides exceed H.264's 4096), pass-through for normal sizes.
+Eq("odd window size is even-aligned", CaptureEngine.FitEncoder(1281, 999, Mf.VideoFormat_H264), (1280, 998));
+Eq("ultrawide clamps to the H264 ceiling", CaptureEngine.FitEncoder(5120, 1440, Mf.VideoFormat_H264), (4096, 1152));
+Eq("normal size passes through", CaptureEngine.FitEncoder(2560, 1440, Mf.VideoFormat_H264), (2560, 1440));
+Eq("AV1 keeps 5K", CaptureEngine.FitEncoder(5120, 1440, Mf.VideoFormat_AV1), (5120, 1440));
+
+// Username scrubbing: word-bounded, and short/generic names must not shred the log.
+Eq("username scrubbed at word boundaries",
+    IssueReport.Scrub("saved by Jax_ok for Jax", @"C:\Users\Jax", "Jax"), "saved by Jax_ok for <user>");
+Eq("two-letter username left alone",
+    IssueReport.Scrub("PC restarted", @"C:\Users\PC", "PC"), "PC restarted");
+
 // Clip naming
 Eq("exe name sanitised", SourceApp.Sanitise("Overwatch 2.exe"), "overwatch-2");
 Eq("path stripped", SourceApp.Sanitise(@"C:\Games\RocketLeague.exe"), "rocketleague");
@@ -374,7 +407,14 @@ if (args.Length > 0 && args[0] is "smoke" or "audio")
             double excluded = CaptureLevel(excludePid: Environment.ProcessId);
             Check("exclusion strips our tone from the mix", excluded < ambient + tone / 10,
                 $"ambient {ambient:F5}, with tone {heard:F5}, excluded {excluded:F5}");
-            Console.WriteLine($"audio levels: ambient {ambient:F4}, +tone {heard:F4}, excluded {excluded:F4}");
+
+            // Include mode is the inverse: our tree IS the mix, so the tone must survive.
+            // A wrong mode flag captures everything but us and lands near silence here.
+            double included = CaptureLevel(Environment.ProcessId, include: true);
+            Check("include mode hears the captured app's tone", included > tone / 10,
+                $"tone {tone:F5}, included {included:F5}");
+            Console.WriteLine(
+                $"audio levels: ambient {ambient:F4}, +tone {heard:F4}, excluded {excluded:F4}, included {included:F4}");
         }
     }
     finally
@@ -382,10 +422,10 @@ if (args.Length > 0 && args[0] is "smoke" or "audio")
         player.Stop();
     }
 
-    static double CaptureLevel(int excludePid)
+    static double CaptureLevel(int excludePid, bool include = false)
     {
-        var path = Path.Combine(Path.GetTempPath(), $"dejavu_cap_{excludePid}.mp4");
-        using (var capture = AudioLoopback.TryStart(path, excludePid))
+        var path = Path.Combine(Path.GetTempPath(), $"dejavu_cap_{excludePid}_{include}.mp4");
+        using (var capture = AudioLoopback.TryStart(path, excludePid, include))
         {
             if (capture is null)
             {
@@ -439,21 +479,34 @@ if (args.Length > 0 && args[0] == "smoke")
         return failed == 0 ? 0 : 1;
     }
 
-    // A d3d11.dll shim beside the exe (ReShade, dxvk, ENB) must not break capture: the
-    // resolver pins system DLLs to System32 (issue #2). version.dll is a real PE that
-    // exports none of the d3d11 surface, so an unpinned probe dies on it.
-    var decoy = Path.Combine(AppContext.BaseDirectory, "d3d11.dll");
+    // d3d11.dll and dxgi.dll shims beside the exe (ReShade, dxvk, ENB) must not break
+    // capture. The resolver pins our own P/Invokes to System32 (issue #2), and
+    // SetDefaultDllDirectories keeps dependency resolution — System32 d3d11 pulling in
+    // dxgi — away from the shims too (issue #3). version.dll is a real PE that exports
+    // none of either surface, so an unpinned probe dies on it.
+    var decoys = new[]
+    {
+        Path.Combine(AppContext.BaseDirectory, "d3d11.dll"),
+        Path.Combine(AppContext.BaseDirectory, "dxgi.dll"),
+    };
     try
     {
-        File.Copy(Path.Combine(Environment.SystemDirectory, "version.dll"), decoy, overwrite: true);
+        foreach (var decoy in decoys)
+        {
+            File.Copy(Path.Combine(Environment.SystemDirectory, "version.dll"), decoy, overwrite: true);
+        }
+
         using var shadowProbe = System.Diagnostics.Process.Start(Environment.ProcessPath!, "probe");
         bool exited = shadowProbe!.WaitForExit(60_000);
-        Check("capture survives a shadowing d3d11.dll", exited && shadowProbe.ExitCode == 0,
+        Check("capture survives shadowing d3d11.dll and dxgi.dll", exited && shadowProbe.ExitCode == 0,
             exited ? $"probe exit {shadowProbe.ExitCode}" : "probe hung");
     }
     finally
     {
-        try { File.Delete(decoy); } catch { }
+        foreach (var decoy in decoys)
+        {
+            try { File.Delete(decoy); } catch { }
+        }
     }
 
     var config = new AppConfig

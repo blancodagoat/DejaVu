@@ -14,6 +14,10 @@ internal static class Program
             return;
         }
 
+        // Version and location up front: log tails in issue reports span updates, and
+        // "runs from a game folder" (issue #2/#3) is invisible without the path.
+        AppLog.Write($"startup: v{UpdateCheck.Current} from {AppInfo.ExecutablePath}");
+
         ApplicationConfiguration.Initialize();
 
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);

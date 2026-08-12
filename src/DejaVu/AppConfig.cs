@@ -24,6 +24,7 @@ internal sealed class ConfigFile
     public int? ClipCapGB { get; set; }
     public string? CaptureTarget { get; set; }
     public string[]? AudioExclude { get; set; }
+    public bool? AppAudioOnly { get; set; }
 }
 
 [JsonSourceGenerationOptions(WriteIndented = true, PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
@@ -86,6 +87,14 @@ internal sealed class AppConfig
     public string[] AudioExclude { get; set; } = DefaultAudioExclude;
 
     /// <summary>
+    /// When capturing a window, record only that app's process-tree audio instead of the
+    /// system mix. Keeps virtual-mixer re-renders (SteelSeries Sonar routes the mic
+    /// through one) and every other app out of clips by construction. Monitor and auto
+    /// capture have no single process, so they keep the system mix.
+    /// </summary>
+    public bool AppAudioOnly { get; set; }
+
+    /// <summary>
     /// Constant-quality target (1–100) for the encoder's quality rate-control mode.
     /// Unlike a fixed bitrate this spends bits on action and almost nothing on static
     /// frames, which is what clip recording wants.
@@ -115,11 +124,16 @@ internal sealed class AppConfig
                 var file = JsonSerializer.Deserialize(json, ConfigJsonContext.Default.ConfigFile);
                 if (file is not null)
                 {
+                    // Rewrite ONLY to fill in missing keys. An out-of-range value is
+                    // clamped in memory but stays on disk untouched: the old
+                    // validate-then-rewrite turned every transient environment
+                    // difference (144 fps validated against a dock that wasn't
+                    // connected at logon) into permanent, silent settings loss.
                     rewrite = false;
 
-                    if (file.BufferMinutes is int minutes && BufferChoices.Contains(minutes))
+                    if (file.BufferMinutes is int minutes)
                     {
-                        config.BufferMinutes = minutes;
+                        config.BufferMinutes = Math.Clamp(minutes, 1, 60);
                     }
                     else
                     {
@@ -132,12 +146,15 @@ internal sealed class AppConfig
                     }
                     else
                     {
-                        rewrite = true;
+                        rewrite |= file.Quality is null;
                     }
 
-                    if (file.Fps is int fps && FpsChoices.Contains(fps))
+                    if (file.Fps is int fps)
                     {
-                        config.Fps = fps;
+                        // Not validated against FpsChoices: those depend on the displays
+                        // attached right now, and a monitor asleep at logon must not
+                        // cost the user their setting.
+                        config.Fps = Math.Clamp(fps, 15, 360);
                     }
                     else
                     {
@@ -150,16 +167,22 @@ internal sealed class AppConfig
                     }
                     else
                     {
-                        rewrite = true;
+                        rewrite |= file.SaveHotkey is null;
                     }
 
                     if (!string.IsNullOrWhiteSpace(file.SaveRoot))
                     {
-                        config.SaveRoot = file.SaveRoot;
+                        // Users hand-edit this: expand %VARS%, and refuse relative paths
+                        // — they resolve against System32 under autostart.
+                        var root = Environment.ExpandEnvironmentVariables(file.SaveRoot);
+                        if (Path.IsPathFullyQualified(root))
+                        {
+                            config.SaveRoot = root;
+                        }
                     }
                     else
                     {
-                        rewrite = true;
+                        rewrite |= file.SaveRoot is null;
                     }
 
                     config.ShowIndicator = file.ShowIndicator ?? true;
@@ -173,9 +196,11 @@ internal sealed class AppConfig
                         config.AudioExclude = file.AudioExclude;
                     }
 
+                    config.AppAudioOnly = file.AppAudioOnly ?? false;
+
                     rewrite |= file.ShowIndicator is null || file.IndicatorStyle is null || file.SystemAudio is null
                         || file.ClipCapGB is null || file.CaptureTarget is null
-                        || file.AudioExclude is null;
+                        || file.AudioExclude is null || file.AppAudioOnly is null;
                 }
             }
         }
@@ -210,10 +235,14 @@ internal sealed class AppConfig
                 ClipCapGB = ClipCapGB,
                 CaptureTarget = CaptureTarget,
                 AudioExclude = AudioExclude,
+                AppAudioOnly = AppAudioOnly,
             };
 
-            File.WriteAllText(
-                AppInfo.ConfigPath, JsonSerializer.Serialize(file, ConfigJsonContext.Default.ConfigFile));
+            // Write-then-rename: a power cut mid-write used to truncate the file, and a
+            // truncated config resets every setting on the next launch.
+            var temp = AppInfo.ConfigPath + ".tmp";
+            File.WriteAllText(temp, JsonSerializer.Serialize(file, ConfigJsonContext.Default.ConfigFile));
+            File.Move(temp, AppInfo.ConfigPath, overwrite: true);
         }
         catch
         {

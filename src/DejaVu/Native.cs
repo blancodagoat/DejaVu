@@ -13,12 +13,26 @@ internal static class Native
     /// </summary>
     public static void PinSystemDlls()
     {
+        // The resolver below only covers this assembly's own P/Invokes. Dependency
+        // resolution is the other half (issue #3): when the pinned System32 d3d11.dll
+        // loads, the loader resolves its dxgi.dll import by normal search order and
+        // still picks up a ReShade shim beside the exe, which then proxies DXGI inside
+        // our process and breaks Media Foundation with E_NOINTERFACE. System32-only
+        // default directories close that path process-wide; the runtime's own natives
+        // are unaffected because the host loads them by full path.
+        SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+
         NativeLibrary.SetDllImportResolver(typeof(Native).Assembly, (name, _, _) =>
             name.Equals("d3d11.dll", StringComparison.OrdinalIgnoreCase)
             || name.Equals("dxgi.dll", StringComparison.OrdinalIgnoreCase)
                 ? NativeLibrary.Load(Path.Combine(Environment.SystemDirectory, name))
                 : IntPtr.Zero);
     }
+
+    private const uint LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x00000800;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetDefaultDllDirectories(uint flags);
 
     public const int WM_HOTKEY = 0x0312;
     public const int WM_KEYUP = 0x0101;
@@ -85,6 +99,15 @@ internal static class Native
 
     [DllImport("user32.dll")]
     public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    /// <summary>Walks child windows until the callback returns false.</summary>
+    public static void EnumChildWindows(IntPtr parent, Func<IntPtr, bool> visit)
+    {
+        EnumChildWindows(parent, (hwnd, _) => visit(hwnd), IntPtr.Zero);
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
 
     [DllImport("user32.dll")]
     public static extern bool IsWindow(IntPtr hWnd);
