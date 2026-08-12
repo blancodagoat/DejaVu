@@ -25,6 +25,7 @@
     <Compile Include="..\..\src\DejaVu\Native.cs" />
     <Compile Include="..\..\src\DejaVu\HotkeyBinding.cs" />
     <Compile Include="..\..\src\DejaVu\AppInfo.cs" />
+    <Compile Include="..\..\src\DejaVu\SelfTidy.cs" />
     <Compile Include="..\..\src\DejaVu\AppConfig.cs" />
     <Compile Include="..\..\src\DejaVu\ReplayBuffer.cs" />
     <Compile Include="..\..\src\DejaVu\SourceApp.cs" />
