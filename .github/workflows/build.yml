@@ -36,4 +36,10 @@ jobs:
           Copy-Item publish/self-contained/DejaVu.exe DejaVu-self-contained.exe
           gh release delete $env:TAG --yes --cleanup-tag
           if ($LASTEXITCODE -ne 0) { "no previous release to replace" }
+          # The tag ref must not exist when the release is created: from Actions, a
+          # release on a pre-existing tag trips workflow-scope enforcement (HTTP 403)
+          # once the release span touches .github/workflows. Recreating the tag via
+          # the release itself is the same path the rolling latest release takes.
+          gh api -X DELETE "repos/$env:GITHUB_REPOSITORY/git/refs/tags/$env:TAG"
+          if ($LASTEXITCODE -ne 0) { "tag ref already absent" }
           gh release create $env:TAG publish/framework-dependent/DejaVu.exe DejaVu-self-contained.exe --target $env:GITHUB_SHA --generate-notes
