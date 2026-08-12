@@ -2,7 +2,7 @@
 # stays current with zero clicks. Two one-time prerequisites:
 #   1. A classic PAT with the public_repo scope, saved as the WINGET_TOKEN repo secret.
 #   2. The package must already exist in winget-pkgs; submit the first version once with
-#      `wingetcreate new https://github.com/blancodagoat/DejaVu/releases/download/v1.0.0/DejaVu.exe`
+#      `wingetcreate new https://github.com/blancodagoat/DejaVu/releases/download/v1.1.0/DejaVu.exe`
 #      (id: blancodagoat.DejaVu). After that PR merges, this workflow handles every update.
 # The rolling "latest" release is ignored: winget needs immutable versioned URLs.
 name: winget
