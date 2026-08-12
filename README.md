@@ -24,6 +24,8 @@
 
 That's the entire app. There is no main window and nothing to set up; every setting lives in the tray menu. You don't have to wait for the buffer to fill either: press the key ninety seconds after launch and you get a ninety-second clip.
 
+**Get it:** `DejaVu.exe` from the [latest release](https://github.com/blancodagoat/DejaVu/releases/latest), or `scoop bucket add blancodagoat https://github.com/blancodagoat/scoop-bucket` then `scoop install dejavu`.
+
 ---
 
 ## Why it doesn't let you down
