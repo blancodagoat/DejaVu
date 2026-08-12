@@ -345,7 +345,13 @@ internal sealed class TrayContext : ApplicationContext
                 var hwnd = handle;
                 var label = title.Length > 48 ? title[..48] + "…" : title;
                 var item = new ToolStripMenuItem(label) { Checked = buffer.WindowTarget == hwnd };
-                item.Click += (_, _) => buffer.SetWindowTarget(hwnd);
+                item.Click += (_, _) =>
+                {
+                    buffer.SetWindowTarget(hwnd);
+                    // The dot belongs on the display being recorded — a game on the
+                    // second monitor left it sitting on the primary, read as "no dot".
+                    indicator.TargetDevice = Native.WindowDisplayDevice(hwnd);
+                };
                 parent.DropDownItems.Add(item);
             }
         }
@@ -526,6 +532,7 @@ internal sealed class TrayContext : ApplicationContext
             indicator.Buffering = running;
         }
 
+        indicator.ReassertTopmost();
         tray.Text = running ? AppInfo.Name : AppInfo.Name + " — paused";
     }
 
