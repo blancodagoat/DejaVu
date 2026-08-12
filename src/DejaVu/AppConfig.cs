@@ -26,6 +26,7 @@ internal sealed class ConfigFile
     public string[]? AudioExclude { get; set; }
     public bool? AppAudioOnly { get; set; }
     public bool? SaveSound { get; set; }
+    public bool? UpdateNotify { get; set; }
 }
 
 [JsonSourceGenerationOptions(WriteIndented = true, PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
@@ -98,6 +99,9 @@ internal sealed class AppConfig
     /// <summary>Chime on save. Balloons are suppressed while a game runs; sound is the
     /// only confirmation a fullscreen player gets.</summary>
     public bool SaveSound { get; set; } = true;
+
+    /// <summary>Opt-in background update notifications. Off = never phones home.</summary>
+    public bool UpdateNotify { get; set; }
 
     /// <summary>
     /// Constant-quality target (1–100) for the encoder's quality rate-control mode.
@@ -203,10 +207,12 @@ internal sealed class AppConfig
 
                     config.AppAudioOnly = file.AppAudioOnly ?? false;
                     config.SaveSound = file.SaveSound ?? true;
+                    config.UpdateNotify = file.UpdateNotify ?? false;
 
                     rewrite |= file.ShowIndicator is null || file.IndicatorStyle is null || file.SystemAudio is null
                         || file.ClipCapGB is null || file.CaptureTarget is null
-                        || file.AudioExclude is null || file.AppAudioOnly is null || file.SaveSound is null;
+                        || file.AudioExclude is null || file.AppAudioOnly is null || file.SaveSound is null
+                        || file.UpdateNotify is null;
                 }
             }
         }
@@ -243,6 +249,7 @@ internal sealed class AppConfig
                 AudioExclude = AudioExclude,
                 AppAudioOnly = AppAudioOnly,
                 SaveSound = SaveSound,
+                UpdateNotify = UpdateNotify,
             };
 
             // Write-then-rename: a power cut mid-write used to truncate the file, and a

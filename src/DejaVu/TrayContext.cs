@@ -15,8 +15,11 @@ internal sealed class TrayContext : ApplicationContext
     private ToolStripMenuItem? saveItem;
     private HotkeyDialog? hotkeyDialog;
 
+    private readonly UpdateNotifier updateNotifier;
+
     private string? lastSaved;
     private string? pendingReport;
+    private Action? pendingUpdate;
     private bool saving;
 
     public TrayContext(SingleInstance instance)
@@ -50,7 +53,12 @@ internal sealed class TrayContext : ApplicationContext
         tray.DoubleClick += (_, _) => OpenSaveFolder();
         tray.BalloonTipClicked += (_, _) =>
         {
-            if (pendingReport is { } report)
+            if (pendingUpdate is { } update)
+            {
+                pendingUpdate = null;
+                update();
+            }
+            else if (pendingReport is { } report)
             {
                 pendingReport = null;
                 IssueReport.Open(report);
@@ -60,6 +68,11 @@ internal sealed class TrayContext : ApplicationContext
                 RevealLastSaved();
             }
         };
+
+        updateNotifier = new UpdateNotifier(() => config.UpdateNotify, (version, url) => OnUi(() =>
+        {
+            AnnounceUpdate(version, url);
+        }));
 
         // Force handle creation so background threads can marshal onto the UI thread
         // through it even while the indicator is hidden.
@@ -214,8 +227,7 @@ internal sealed class TrayContext : ApplicationContext
                 var newer = await UpdateCheck.FindNewer(UpdateCheck.Current);
                 if (newer is { } found)
                 {
-                    Balloon("Update available", $"DejaVu v{found.Version} is out; opening the release page.", ToolTipIcon.Info);
-                    Process.Start(new ProcessStartInfo(found.Url) { UseShellExecute = true });
+                    AnnounceUpdate(found.Version, found.Url);
                 }
                 else
                 {
@@ -234,6 +246,12 @@ internal sealed class TrayContext : ApplicationContext
             }
         };
         menu.Items.Add(updates);
+
+        var notify = Toggle("Notify about new versions", () => config.UpdateNotify,
+            v => config.UpdateNotify = v);
+        notify.ToolTipText = "Checks GitHub a few times a day, which means GitHub sees your IP. "
+            + "Off (the default), the app never phones home.";
+        menu.Items.Add(notify);
 
         // Off the UI thread: IsEnabled falls back to schtasks.exe with a 10 s wait when
         // the Run value is absent — exactly the case for anyone who turned autostart
@@ -543,10 +561,36 @@ internal sealed class TrayContext : ApplicationContext
 
     private void Balloon(string title, string text, ToolTipIcon icon)
     {
-        // Any newer balloon supersedes a pending report, so a click on "Replay saved"
-        // can never open an issue page.
+        // Any newer balloon supersedes a pending report or update action, so a click on
+        // "Replay saved" can never open an issue page or a release page.
         pendingReport = null;
+        pendingUpdate = null;
         tray.ShowBalloonTip(4000, title, text, icon);
+    }
+
+    /// <summary>One update balloon, aimed at how this copy is actually managed: a scoop
+    /// install must update through scoop (a raw exe would orphan the package), and a
+    /// loose exe gets the download link plus a nudge toward being properly installed.</summary>
+    private void AnnounceUpdate(Version version, string url)
+    {
+        if (ScoopInstall.Active)
+        {
+            Balloon("Update available",
+                $"{AppInfo.Name} v{version} is out — click to copy \"{ScoopInstall.UpdateCommand}\".",
+                ToolTipIcon.Info);
+            pendingUpdate = () =>
+            {
+                Clipboard.SetText(ScoopInstall.UpdateCommand);
+                Balloon("Copied", $"Paste \"{ScoopInstall.UpdateCommand}\" into a terminal.", ToolTipIcon.None);
+            };
+        }
+        else
+        {
+            Balloon("Update available",
+                $"{AppInfo.Name} v{version} is out — click to download. Tip: \"scoop install {AppInfo.Name.ToLowerInvariant()}\" makes updates one command.",
+                ToolTipIcon.Info);
+            pendingUpdate = () => Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+        }
     }
 
     /// <summary>
@@ -571,6 +615,7 @@ internal sealed class TrayContext : ApplicationContext
     {
         if (disposing)
         {
+            updateNotifier.Dispose();
             tray.Visible = false;
             tray.Dispose();
             buffer.Dispose();
