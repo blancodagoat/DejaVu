@@ -20,11 +20,11 @@
 
 1. **A red dot in the corner** means your screen is being buffered. It starts with Windows and stays on.
 2. **Something clip-worthy happens.**
-3. **Press <kbd>Alt</kbd>+<kbd>F10</kbd>** and `eldenring_2026-08-11_224513.mp4` lands in `Videos\DejaVu`. A balloon confirms it; clicking the balloon opens the file.
+3. **Press <kbd>Alt</kbd>+<kbd>F10</kbd>** and `eldenring_2026-08-11_224513.mp4` lands in `Videos\DejaVu`. A short chime plays and a balloon confirms it; clicking the balloon opens the file. The chime matters more than it sounds: Windows hides balloons while a game is fullscreen, so the sound is the confirmation you actually get mid-match.
 
 That's the entire app. There is no main window and nothing to set up; every setting lives in the tray menu. You don't have to wait for the buffer to fill either: press the key ninety seconds after launch and you get a ninety-second clip.
 
-**Get it:** `DejaVu.exe` from the [latest release](https://github.com/blancodagoat/DejaVu/releases/latest), or `scoop bucket add blancodagoat https://github.com/blancodagoat/scoop-bucket` then `scoop install dejavu`.
+**Get it:** `DejaVu.exe` from the [latest release](https://github.com/blancodagoat/DejaVu/releases/latest), or `scoop bucket add blancodagoat https://github.com/blancodagoat/scoop-bucket` then `scoop install dejavu`. If your browser saved it as `DejaVu (1).exe` next to an old copy, run it anyway: on launch it deletes the stale copies beside it and renames itself back.
 
 ---
 
@@ -35,7 +35,7 @@ That's the entire app. There is no main window and nothing to set up; every sett
 | ShadowPlay turns itself off silently, so you press the key and nothing was recording | Always on; if capture breaks it falls back to the main display, keeps going, and tells you so |
 | OBS makes you remember to start the buffer every session | Buffering starts the moment the app launches, including at boot |
 | A crash eats your clip, because RAM buffers lose everything | The buffer lives on disk in crash-safe segments; after a crash, the next launch saves what survived |
-| Discord pings and voice chat leak into shared clips | Discord's audio is excluded from the mix by default, with nothing to configure |
+| Discord pings and voice chat leak into shared clips | Capture a game window and the clip carries that game's audio, nothing else. Monitor capture excludes Discord from the mix by default |
 | `Replay_2024_final(3).mp4` filename chaos | Clips are named after the game that was on screen |
 | Saved clips eat your disk forever | An optional cap rolls the oldest clips off past 10/25/50 GB, and the newest is never touched |
 
@@ -50,10 +50,14 @@ That's the entire app. There is no main window and nothing to set up; every sett
 | Quality | Low / Medium / High. Constant-quality encoding: action gets the bits, menus cost almost nothing |
 | Frame rate | 30 to 240 fps, offered up to what your display can actually show |
 | System audio | On or off. The mic is never recorded |
-| Keep Discord out of clips | On by default; one click puts voice chat back into the mix |
+| Captured app audio only | On by default. With a window captured, the clip carries that app's audio alone, even when a virtual mixer like SteelSeries Sonar routes the app to its own output device |
+| Keep Discord out of clips | Applies to monitor capture; one click puts voice chat back into the mix |
+| Save sound | A chime when a clip saves, a low buzz when a save fails. Off if you prefer silence |
+| Replays folder | Open it or move it somewhere else, both from the menu |
 | Clip folder cap | Off / 10 / 25 / 50 GB |
 | Hotkey | Click-to-rebind dialog |
-| Corner indicator | Off, the red dot, or the app icon. Click-through and never appears in your clips |
+| Corner indicator | Off, the red dot, or the app icon. It sits on the display being recorded, stays above fullscreen games, and never appears in your clips |
+| Notify about new versions | Off by default, so the app stays silent on the network. On, it asks GitHub a few times a day; on a scoop install, clicking the update balloon runs the whole update and restarts the app |
 
 > **Admin games:** if the hotkey stops working while a game with anti-cheat has focus, hit *Restart as administrator* in the tray once. That's a Windows rule, not ours.
 
@@ -72,7 +76,7 @@ That's the entire app. There is no main window and nothing to set up; every sett
 
 <sub>Based on each tool's design and widely reported user complaints; both evolve, so verify against current versions.</sub>
 
-**Honest numbers:** while buffering 1440p60 at High, DejaVu's measured working set is about 135 MB, most of it the hardware encoder's own working space, and shrinking it further is an active work item. Paused, it's a tray icon. There is no overlay, no background service, and no FPS tax from an in-game UI. On modern GPUs (RTX 40+, RX 7000+, Arc) it records AV1, which gets you the same quality in roughly a third smaller files; everywhere else it falls back to H.264 on its own.
+**Honest numbers:** while buffering 1440p60 at High, DejaVu's measured working set is about 160 MB, most of it the hardware encoder's own working space, and shrinking it further is an active work item. Paused, it's a tray icon. There is no overlay, no background service, and no FPS tax from an in-game UI. On modern GPUs (RTX 40+, RX 7000+, Arc) it records AV1, which gets you the same quality in roughly a third smaller files; everywhere else it falls back to H.264 on its own.
 
 ---
 
@@ -86,7 +90,7 @@ That's the entire app. There is no main window and nothing to set up; every sett
 - Saving stitches the segments covering your window into one standard MP4. It's a lossless remux, no re-encode, done in a couple of seconds.
 - Segments on disk at launch mean the last session died, so they're stitched into `recovered_*.mp4` automatically and you get a balloon. A recovered clip that won't decode is thrown away rather than handed to you.
 - If a capture source delivers zero frames, the buffer drops it for the main display and says so. A sleeping or locked screen just idles until you're back. Repeated hard failures pause it for a minute at a time between retries, and it reports that too; it never stops silently.
-- Replay audio comes from Windows' process-loopback device with Discord's process tree removed from the mix (voice, pings, everything), encoded to AAC live and muxed per segment. The excluded apps are the `audioExclude` list in config, defaulting to Discord, Canary, PTB, and Vesktop.
+- Replay audio matches what you capture. A captured window records that app's audio: through the app's own output device when a virtual mixer (SteelSeries Sonar, per-app output settings) routes it there, through include-mode process loopback otherwise. Monitor capture records the system mix with the `audioExclude` process trees removed (Discord, Canary, PTB, and Vesktop by default). Either way it's encoded to AAC live, muxed per segment, and the route each session took is written to the log.
 - Everything the app does gets a line in `%APPDATA%\DejaVu\log.txt`, so a problem in the field leaves a trace instead of a vanished balloon.
 
 </details>
@@ -110,8 +114,8 @@ DejaVu is built for roughly 2015 machines and up:
 <br>
 
 - The buffer lives in `%LOCALAPPDATA%\DejaVu\buffer` and is wiped on a clean exit. After a crash it becomes your recovered clip instead.
-- Nothing leaves your machine. No uploads, no account, no telemetry. The app never phones home; the update check in the tray menu runs only when you click it — unless you opt in to "Notify about new versions", which asks GitHub a few times a day.
-- Failure balloons offer "click to report": that click only opens a prefilled GitHub issue in your browser (with the log tail, usernames scrubbed) for you to review and submit — or close. The app itself sends nothing, ever.
+- Nothing leaves your machine. No uploads, no account, no telemetry. The app never phones home; the update check in the tray menu runs only when you click it. The one exception is opt-in: turn on "Notify about new versions" and it asks GitHub a few times a day, which means GitHub sees your IP.
+- Failure balloons offer "click to report": that click only opens a prefilled GitHub issue in your browser (with the log tail, usernames scrubbed) for you to review and submit, or just close. The app itself sends nothing, ever.
 - Pause buffering any time from the tray; the dot turns grey.
 - The mic is never captured, and Discord voices are kept out of the mix by default.
 
@@ -125,10 +129,10 @@ DejaVu is built for roughly 2015 machines and up:
 | Where | What |
 |---|---|
 | `Videos\DejaVu` | your saved replays |
-| `%APPDATA%\DejaVu\config.json` | all settings (broken values repair themselves to defaults) |
+| `%APPDATA%\DejaVu\config.json` | all settings (missing keys fill themselves in; out-of-range values are clamped in memory without rewriting your file) |
 | `%LOCALAPPDATA%\DejaVu\buffer` | the rolling buffer |
 
-Config keys: `bufferMinutes` (5 to 25) · `quality` · `fps` · `saveHotkey` · `saveRoot` · `captureTarget` (`"auto"` or `\\.\DISPLAY2`) · `showIndicator` · `indicatorStyle` (`"dot"` or `"icon"`) · `systemAudio` · `clipCapGB` · `audioExclude`
+Config keys: `bufferMinutes` (5 to 25) · `quality` · `fps` · `saveHotkey` · `saveRoot` · `captureTarget` (`"auto"` or `\\.\DISPLAY2`) · `showIndicator` · `indicatorStyle` (`"dot"` or `"icon"`) · `systemAudio` · `appAudioOnly` · `clipCapGB` · `audioExclude` · `saveSound` · `updateNotify`
 
 </details>
 
