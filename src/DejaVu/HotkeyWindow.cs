@@ -9,6 +9,7 @@ internal sealed class HotkeyWindow : NativeWindow, IDisposable
 {
     public event Action<HotkeyId>? HotkeyPressed;
     public event Action? ShowSettingsRequested;
+    public event Action? QuitRequested;
 
     public HotkeyWindow()
     {
@@ -42,6 +43,10 @@ internal sealed class HotkeyWindow : NativeWindow, IDisposable
 
             case Native.WM_APP_SHOW_SETTINGS:
                 ShowSettingsRequested?.Invoke();
+                return;
+
+            case Native.WM_APP_QUIT:
+                QuitRequested?.Invoke();
                 return;
         }
 

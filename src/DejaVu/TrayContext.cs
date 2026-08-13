@@ -34,6 +34,7 @@ internal sealed class TrayContext : ApplicationContext
         hotkeys.HotkeyPressed += _ => SaveReplay();
         hotkeys.ShowSettingsRequested += () =>
             Balloon(AppInfo.Name + " is already running", "Right-click the tray icon.", ToolTipIcon.Info);
+        hotkeys.QuitRequested += ExitThread;
         instance.ListenForSignals(hotkeys.Handle);
 
         bool hotkeyOk = hotkeys.Register(HotkeyId.Save, config.SaveHotkey);
