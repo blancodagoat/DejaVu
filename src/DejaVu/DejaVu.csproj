@@ -11,7 +11,7 @@
     <AssemblyName>DejaVu</AssemblyName>
     <RootNamespace>DejaVu</RootNamespace>
     <Product>DejaVu</Product>
-    <Version>1.2.9</Version>
+    <Version>1.2.10</Version>
     <InvariantGlobalization>true</InvariantGlobalization>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Platforms>x64</Platforms>

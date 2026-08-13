@@ -44,6 +44,10 @@ internal static class Native
     /// <summary>Posted to the hotkey window by the single-instance watcher.</summary>
     public const int WM_APP_SHOW_SETTINGS = 0x0400 + 17;
 
+    /// <summary>Posted when another process (the Triumvirate suite) asks for a clean
+    /// exit — kills leave crash-recovery noise behind; this path finalizes properly.</summary>
+    public const int WM_APP_QUIT = 0x0400 + 18;
+
     public static readonly IntPtr HWND_MESSAGE = new(-3);
 
     // hotkey modifiers

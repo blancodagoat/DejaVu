@@ -9,9 +9,11 @@ internal sealed class SingleInstance : IDisposable
 {
     private const string MutexName = @"Local\DejaVu.SingleInstance";
     private const string SignalName = @"Local\DejaVu.ShowSettings";
+    private const string QuitName = @"Local\DejaVu.Quit";
 
     private readonly Mutex mutex;
     private EventWaitHandle? signal;
+    private EventWaitHandle? quit;
     private Thread? watcher;
     private volatile bool stopping;
 
@@ -66,18 +68,25 @@ internal sealed class SingleInstance : IDisposable
     public void ListenForSignals(IntPtr targetWindow)
     {
         signal = new EventWaitHandle(false, EventResetMode.AutoReset, SignalName);
+        // A named quit event so an outside manager (the Triumvirate suite) can ask for
+        // a clean exit instead of killing the process into its crash-recovery path.
+        quit = new EventWaitHandle(false, EventResetMode.AutoReset, QuitName);
 
         watcher = new Thread(() =>
         {
+            var handles = new WaitHandle[] { signal, quit };
             while (!stopping)
             {
-                signal.WaitOne();
+                int which = WaitHandle.WaitAny(handles);
                 if (stopping)
                 {
                     return;
                 }
 
-                Native.PostMessageW(targetWindow, Native.WM_APP_SHOW_SETTINGS, IntPtr.Zero, IntPtr.Zero);
+                Native.PostMessageW(
+                    targetWindow,
+                    which == 1 ? Native.WM_APP_QUIT : Native.WM_APP_SHOW_SETTINGS,
+                    IntPtr.Zero, IntPtr.Zero);
             }
         })
         {
@@ -102,6 +111,7 @@ internal sealed class SingleInstance : IDisposable
         }
 
         signal?.Dispose();
+        quit?.Dispose();
 
         if (IsFirstInstance)
         {
