@@ -146,6 +146,9 @@ internal sealed class TrayContext : ApplicationContext
 
         if (!hotkeyOk)
         {
+            // Only the balloon said so before, and balloons are exactly what Focus Assist
+            // eats — "the hotkey does nothing" arrived as a bug report with a clean log.
+            AppLog.Write($"hotkey {config.SaveHotkey} could not be registered; another app holds it");
             Balloon(
                 "Hotkey unavailable",
                 $"{config.SaveHotkey} is taken by another app. Edit {AppInfo.ConfigPath} to rebind.",
@@ -473,6 +476,10 @@ internal sealed class TrayContext : ApplicationContext
         }
 
         saving = true;
+        // Timestamped on the UI thread, where the hotkey lands: the gap between this line
+        // and "saved" is the honest wall-clock a user feels, and a gap between the press
+        // and THIS line is a stalled message pump rather than a slow save.
+        AppLog.Write("save requested");
         // Resolved before anything else: once saving starts the foreground app is the
         // only trace of what the clip is about.
         var appName = SourceApp.Resolve();
