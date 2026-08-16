@@ -18,8 +18,11 @@ internal static class Program
         SelfTidy.Run();
 
         // Version and location up front: log tails in issue reports span updates, and
-        // "runs from a game folder" (issue #2/#3) is invisible without the path.
-        AppLog.Write($"startup: v{UpdateCheck.Current} from {AppInfo.ExecutablePath}");
+        // "runs from a game folder" (issue #2/#3) is invisible without the path. The
+        // elevation state belongs here too — "the hotkey does nothing in game" is this
+        // line reading "not elevated", and nothing else in the log gives it away.
+        AppLog.Write($"startup: v{UpdateCheck.Current} "
+            + $"{(Elevation.IsElevated ? "elevated" : "not elevated")} from {AppInfo.ExecutablePath}");
 
         ApplicationConfiguration.Initialize();
 

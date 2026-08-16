@@ -29,7 +29,11 @@ internal sealed class ReplayBuffer : IDisposable
     private string? currentAudioPath;
     private string? currentSegmentPath;
     private AudioLoopback? currentAudio;
-    private bool running;
+    // Volatile so the tray's 5-second status poll can read it WITHOUT the gate: every
+    // UI-thread lock on this gate is a window where a slow engine start/rotation stalls
+    // the message pump, and a stalled pump means a queued WM_HOTKEY — a save that looks
+    // like it did nothing until minutes later.
+    private volatile bool running;
     private IntPtr windowTarget;
     private bool sourceFallback;
     private int consecutiveFailures;
@@ -72,10 +76,8 @@ internal sealed class ReplayBuffer : IDisposable
         }
     }
 
-    public bool Running
-    {
-        get { lock (gate) { return running; } }
-    }
+    /// <summary>A snapshot, deliberately lock-free — see <see cref="running"/>.</summary>
+    public bool Running => running;
 
     /// <summary>Raised from a background thread when a segment recorder dies.</summary>
     public event Action<string>? Failed;
@@ -581,7 +583,9 @@ internal sealed class ReplayBuffer : IDisposable
     public string Save(string appName = SourceApp.Unknown)
     {
         bool wasRunning = Running;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         Stop();
+        long finalizeMs = clock.ElapsedMilliseconds;
         try
         {
             var now = DateTime.Now;
@@ -628,7 +632,12 @@ internal sealed class ReplayBuffer : IDisposable
             {
                 // Always through the remuxer, even for a single segment: the buffer files are
                 // fragmented MP4, and this pass is what turns the save into a standard one.
+                long remuxStart = clock.ElapsedMilliseconds;
                 Mp4Concat.Concat(segments, output);
+                // A field report of a slow save is unreadable without this split: a slow
+                // finalize is the encoder draining, a slow remux is disk.
+                AppLog.Write($"save: {segments.Count} segments, finalize {finalizeMs} ms, "
+                    + $"remux {clock.ElapsedMilliseconds - remuxStart} ms");
             }
             catch
             {
