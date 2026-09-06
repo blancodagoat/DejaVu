@@ -82,7 +82,7 @@ That's the entire app. There is no main window and nothing to set up; every sett
 
 <sub>Based on each tool's design and widely reported user complaints; both evolve, so verify against current versions.</sub>
 
-**Honest numbers:** while buffering 1440p60 at High, DejaVu's measured working set is about 160 MB, most of it the hardware encoder's own working space, and shrinking it further is an active work item. Paused, it's a tray icon. There is no overlay, no background service, and no FPS tax from an in-game UI. On modern GPUs (RTX 40+, RX 7000+, Arc) it records AV1, which gets you the same quality in roughly a third smaller files; everywhere else it falls back to H.264 on its own.
+**Honest numbers:** while buffering 1440p60 at High, DejaVu's measured working set is about 160 MB, most of it the hardware encoder's own working space, and shrinking it further is an active work item. Paused, it's a tray icon. There is no overlay, no background service, and no FPS tax from an in-game UI. On modern GPUs (RTX 40+, RX 7000+, Arc) it records AV1, which gets you the same quality in roughly a third smaller files; everywhere else it falls back to H.264 on its own — including mid-session, if the encoder turns out to produce AV1 the container can't hold.
 
 ---
 
@@ -91,7 +91,7 @@ That's the entire app. There is no main window and nothing to set up; every sett
 
 <br>
 
-- The capture engine is our own: Windows.Graphics.Capture frames go straight into a Media Foundation hardware encoder (AV1 where the GPU can, H.264 otherwise). Frames never leave the GPU, and there are no third-party components in the app at all.
+- The capture engine is our own: frames go straight into a Media Foundation hardware encoder (AV1 where the GPU can, H.264 otherwise), never leave the GPU, and there are no third-party components in the app at all. Two sources feed it — Windows.Graphics.Capture by default, and DXGI Desktop Duplication for displays where the Windows 10 capture border has to go, which arrives without a cursor so one is drawn back in.
 - Capture never stops. The encoder rotates between one-minute fragmented-MP4 segment files, so a seam costs at most one frame, and killing the power mid-write still leaves playable files. Old segments delete themselves, which keeps disk use flat.
 - Saving stitches the segments covering your window into one standard MP4. It's a lossless remux, no re-encode, done in a couple of seconds.
 - Segments on disk at launch mean the last session died, so they're stitched into `recovered_*.mp4` automatically and you get a balloon. A recovered clip that won't decode is thrown away rather than handed to you.
@@ -138,7 +138,7 @@ DejaVu is built for roughly 2015 machines and up:
 | `%APPDATA%\DejaVu\config.json` | all settings (missing keys fill themselves in; out-of-range values are clamped in memory without rewriting your file) |
 | `%LOCALAPPDATA%\DejaVu\buffer` | the rolling buffer |
 
-Config keys: `bufferMinutes` (5 to 25) · `quality` · `fps` · `saveHotkey` · `saveRoot` · `captureTarget` (`"auto"` or `\\.\DISPLAY2`) · `showIndicator` · `indicatorStyle` (`"dot"` or `"icon"`) · `systemAudio` · `appAudioOnly` · `clipCapGB` · `audioExclude` · `saveSound` · `updateNotify`
+Config keys: `bufferMinutes` (5 to 25) · `quality` · `fps` · `saveHotkey` · `saveRoot` · `captureTarget` (`"auto"` or `\\.\DISPLAY2`) · `showIndicator` · `indicatorStyle` (`"dot"` or `"icon"`) · `systemAudio` · `appAudioOnly` · `clipCapGB` · `audioExclude` · `saveSound` · `updateNotify` · `captureBackend` (`"wgc"` or `"duplication"`)
 
 </details>
 
