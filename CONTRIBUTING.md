@@ -13,7 +13,7 @@ dotnet run --project tests/DejaVu.Tests   # run the test suite (exit code 0 = pa
 
 ## Ground rules
 
-- **No dependencies.** The app is stdlib + Win32 only; all interop lives in `src/DejaVu/Native.cs`.
+- **No dependencies.** The app is stdlib + Win32 only. General Win32 P/Invoke goes in `src/DejaVu/Native.cs`; capture, encode and audio COM interop stays beside the code that owns it.
 - **Stay light.** The pitch is ~8 MB of RAM and under 1 MB to download. Anything that moves those numbers needs a very good reason.
 - **Tests run headless.** Logic that doesn't need a live desktop goes in a testable file (see `tests/DejaVu.Tests/Tests.cs` for the pattern) with assertions added there.
 
