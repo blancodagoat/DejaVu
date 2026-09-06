@@ -40,9 +40,11 @@ internal sealed class CaptureEngine : IDisposable
     private readonly IntPtr d3dContext;
     private readonly Mf.IMFDXGIDeviceManager deviceManager;
     private readonly IDirect3DDevice winrtDevice;
-    private readonly GraphicsCaptureItem item;
-    private readonly Direct3D11CaptureFramePool framePool;
-    private readonly GraphicsCaptureSession session;
+    // One of these two is null: WGC for windows and for anyone happy with the capture
+    // border, Desktop Duplication for displays where that border has to go (#6).
+    private readonly Direct3D11CaptureFramePool? framePool;
+    private readonly GraphicsCaptureSession? session;
+    private readonly DesktopDuplication? duplication;
     private readonly Mf.IMFVideoSampleAllocatorEx allocator;
     private readonly Mf.IMFMediaType inputType;
 
@@ -61,6 +63,9 @@ internal sealed class CaptureEngine : IDisposable
 
     public Guid Codec { get; private set; }
 
+    /// <summary>True when frames come from Desktop Duplication rather than WGC.</summary>
+    public bool UsingDuplication => duplication is not null;
+
     /// <summary>Even-aligned and clamped to the codec's ceiling, aspect preserved.
     /// H.264 encoders cap at 4096 per axis; hardware AV1 goes to 8192.</summary>
     public static (int W, int H) FitEncoder(int w, int h, Guid codec)
@@ -76,8 +81,10 @@ internal sealed class CaptureEngine : IDisposable
         return (Math.Max(2, w & ~1), Math.Max(2, h & ~1));
     }
 
-    /// <summary>Captures a monitor (window handle zero) or a window (monitor zero).</summary>
-    public CaptureEngine(IntPtr monitor, IntPtr window, int fps, int quality)
+    /// <summary>Captures a monitor (window handle zero) or a window (monitor zero).
+    /// <paramref name="duplicate"/> asks for the Desktop Duplication source, which is
+    /// ignored for a window target because DXGI duplicates outputs, not windows.</summary>
+    public CaptureEngine(IntPtr monitor, IntPtr window, int fps, int quality, bool duplicate = false)
     {
         this.fps = fps;
         this.quality = quality;
@@ -115,54 +122,93 @@ internal sealed class CaptureEngine : IDisposable
             Marshal.Release(dxgiPtr);
         }
 
-        // The capture item comes from the classic interop factory — WinRT has no public
-        // constructor from a raw HMONITOR/HWND.
-        var interop = GraphicsCaptureItem.As<IGraphicsCaptureItemInterop>();
-        var itemIid = IID_IGraphicsCaptureItem;
-        var itemPtr = window != IntPtr.Zero
-            ? interop.CreateForWindow(window, ref itemIid)
-            : interop.CreateForMonitor(monitor, ref itemIid);
-        item = GraphicsCaptureItem.FromAbi(itemPtr);
-        Marshal.Release(itemPtr);
+        GraphicsCaptureItem? item = null;
+        if (duplicate && window == IntPtr.Zero)
+        {
+            duplication = new DesktopDuplication(d3dDevice, d3dContext, monitor, fps);
+            width = duplication.Width;
+            height = duplication.Height;
+        }
+        else
+        {
+            // The capture item comes from the classic interop factory — WinRT has no
+            // public constructor from a raw HMONITOR/HWND.
+            var interop = GraphicsCaptureItem.As<IGraphicsCaptureItemInterop>();
+            var itemIid = IID_IGraphicsCaptureItem;
+            var itemPtr = window != IntPtr.Zero
+                ? interop.CreateForWindow(window, ref itemIid)
+                : interop.CreateForMonitor(monitor, ref itemIid);
+            item = GraphicsCaptureItem.FromAbi(itemPtr);
+            Marshal.Release(itemPtr);
 
-        width = item.Size.Width;
-        height = item.Size.Height;
+            width = item.Size.Width;
+            height = item.Size.Height;
+        }
+
         if (width < 2 || height < 2)
         {
+            duplication?.Dispose();
             throw new InvalidOperationException("The capture target has no visible size (minimized window?).");
         }
 
-        // ARGB32, deliberately: MF maps it to B8G8R8A8 — the exact format of WGC frame
-        // textures. RGB32 would map to B8G8R8X8, and CopyResource silently no-ops on a
-        // format mismatch, encoding untouched (black) allocator textures. Diagnosed by
-        // decode-probing output that "looked" valid by size and duration.
-        inputType = CreateVideoType(Mf.VideoFormat_ARGB32, width, height, stride: width * 4);
-
-        // GPU-backed sample pool with hard backpressure: initial 2, max 6 in flight.
-        // A slow encoder empties the pool and frames drop — memory stays flat.
-        var allocIid = IID_IMFVideoSampleAllocatorEx;
-        Mf.Check(Mf.MFCreateVideoSampleAllocatorEx(ref allocIid, out var allocObj));
-        allocator = (Mf.IMFVideoSampleAllocatorEx)allocObj;
-        Mf.Check(allocator.SetDirectXManager(deviceManager));
-        Mf.Check(allocator.InitializeSampleAllocatorEx(2, 6, null, inputType));
-
-        framePool = Direct3D11CaptureFramePool.CreateFreeThreaded(
-            winrtDevice, DirectXPixelFormat.B8G8R8A8UIntNormalized, 2, item.Size);
-        session = framePool.CreateCaptureSession(item);
-        session.IsCursorCaptureEnabled = true;
         try
         {
-            session.IsBorderRequired = false;
+            // ARGB32, deliberately: MF maps it to B8G8R8A8 — the exact format of WGC frame
+            // textures. RGB32 would map to B8G8R8X8, and CopyResource silently no-ops on a
+            // format mismatch, encoding untouched (black) allocator textures. Diagnosed by
+            // decode-probing output that "looked" valid by size and duration.
+            inputType = CreateVideoType(Mf.VideoFormat_ARGB32, width, height, stride: width * 4);
+
+            // GPU-backed sample pool with hard backpressure: initial 2, max 6 in flight.
+            // A slow encoder empties the pool and frames drop — memory stays flat.
+            var allocIid = IID_IMFVideoSampleAllocatorEx;
+            Mf.Check(Mf.MFCreateVideoSampleAllocatorEx(ref allocIid, out var allocObj));
+            allocator = (Mf.IMFVideoSampleAllocatorEx)allocObj;
+            Mf.Check(allocator.SetDirectXManager(deviceManager));
+            Mf.Check(allocator.InitializeSampleAllocatorEx(2, 6, null, inputType));
+
+            if (duplication is not null)
+            {
+                // The size is fixed by the output, so the per-frame size check never
+                // fires here; a mode change arrives as Failed and rebuilds the engine.
+                duplication.FrameArrived += (texture, now) => WriteFrame(texture, width, height, now);
+                duplication.Failed += message =>
+                {
+                    if (!errored)
+                    {
+                        errored = true;
+                        Error?.Invoke(message);
+                    }
+                };
+            }
+            else
+            {
+                framePool = Direct3D11CaptureFramePool.CreateFreeThreaded(
+                    winrtDevice, DirectXPixelFormat.B8G8R8A8UIntNormalized, 2, item!.Size);
+                session = framePool.CreateCaptureSession(item);
+                session.IsCursorCaptureEnabled = true;
+                try
+                {
+                    session.IsBorderRequired = false;
+                }
+                catch
+                {
+                    // Windows 11 (or Server 2022) only — the property does not exist
+                    // below it, so Windows 10 shows the yellow capture border for as
+                    // long as the buffer runs and no API turns it off (#6). Desktop
+                    // Duplication is the way out there.
+                }
+
+                framePool.FrameArrived += OnFrameArrived;
+            }
         }
         catch
         {
-            // Windows 11 (or Server 2022) only — the property does not exist below it,
-            // so Windows 10 shows the yellow capture border for as long as the buffer
-            // runs and there is no API to turn it off (#6). Only a Desktop Duplication
-            // capture path avoids it there.
+            // A live duplication is a limited system resource; leaking one per failed
+            // engine would eventually let nothing capture at all.
+            duplication?.Dispose();
+            throw;
         }
-
-        framePool.FrameArrived += OnFrameArrived;
     }
 
     public void Start(string segmentPath)
@@ -175,7 +221,8 @@ internal sealed class CaptureEngine : IDisposable
             errored = false;
         }
 
-        session.StartCapture();
+        session?.StartCapture();
+        duplication?.Start();
     }
 
     /// <summary>
@@ -263,26 +310,53 @@ internal sealed class CaptureEngine : IDisposable
             return;
         }
 
+        try
+        {
+            var contentSize = frame.ContentSize;
+            var access = frame.Surface.As<IDirect3DDxgiInterfaceAccess>();
+            var texIid = IID_ID3D11Texture2D;
+            Mf.Check(access.GetInterface(ref texIid, out var sourceTexture));
+            try
+            {
+                WriteFrame(sourceTexture, contentSize.Width, contentSize.Height,
+                    frame.SystemRelativeTime.Ticks);
+            }
+            finally
+            {
+                Marshal.Release(sourceTexture);
+            }
+        }
+        catch (Exception ex)
+        {
+            Fail("surface-access", ex);
+        }
+    }
+
+    /// <summary>
+    /// The write path both frame sources share: a B8G8R8A8 texture on this engine's
+    /// device and the 100 ns tick it was captured at. Where the texture came from —
+    /// Windows.Graphics.Capture or Desktop Duplication — stops mattering here.
+    /// </summary>
+    private void WriteFrame(IntPtr sourceTexture, int frameWidth, int frameHeight, long now)
+    {
+        // A resized window (or changed display mode) delivers frames at a new size;
+        // CopyResource silently no-ops on mismatched textures and the clip freezes
+        // while looking healthy. Surface it through the error path — the restart
+        // rebuilds the engine at the new size.
+        if (frameWidth != width || frameHeight != height)
+        {
+            if (!errored)
+            {
+                errored = true;
+                Error?.Invoke($"capture size changed to {frameWidth}x{frameHeight}");
+            }
+
+            return;
+        }
+
         string stage = "start";
         try
         {
-            // A resized window (or changed display mode) delivers frames at a new size;
-            // CopyResource silently no-ops on mismatched textures and the clip freezes
-            // while looking healthy. Surface it through the error path — the restart
-            // rebuilds the engine at the new size.
-            var contentSize = frame.ContentSize;
-            if (contentSize.Width != width || contentSize.Height != height)
-            {
-                if (!errored)
-                {
-                    errored = true;
-                    Error?.Invoke($"capture size changed to {contentSize.Width}x{contentSize.Height}");
-                }
-
-                return;
-            }
-
-            long now = frame.SystemRelativeTime.Ticks;
             lock (gate)
             {
                 if (writer is null)
@@ -313,42 +387,31 @@ internal sealed class CaptureEngine : IDisposable
 
                 try
                 {
-                    stage = "surface-access";
-                    var access = frame.Surface.As<IDirect3DDxgiInterfaceAccess>();
-                    var texIid = IID_ID3D11Texture2D;
-                    Mf.Check(access.GetInterface(ref texIid, out var sourceTexture));
+                    stage = "sample-buffer";
+                    Mf.Check(sample.GetBufferByIndex(0, out var buffer));
                     try
                     {
-                        stage = "sample-buffer";
-                        Mf.Check(sample.GetBufferByIndex(0, out var buffer));
+                        var dxgi = (Mf.IMFDXGIBuffer)buffer;
+                        var resIid = IID_ID3D11Texture2D;
+                        stage = "buffer-resource";
+                        Mf.Check(dxgi.GetResource(ref resIid, out var destTexture));
                         try
                         {
-                            var dxgi = (Mf.IMFDXGIBuffer)buffer;
-                            var resIid = IID_ID3D11Texture2D;
-                            stage = "buffer-resource";
-                            Mf.Check(dxgi.GetResource(ref resIid, out var destTexture));
-                            try
-                            {
-                                stage = "copy";
-                                CopyResource(d3dContext, destTexture, sourceTexture);
-                            }
-                            finally
-                            {
-                                Marshal.Release(destTexture);
-                            }
-
-                            // DXGI-backed buffers report zero length until told otherwise,
-                            // and the writer rejects zero-length samples.
-                            Mf.Check(buffer.SetCurrentLength((uint)(width * height * 4)));
+                            stage = "copy";
+                            CopyResource(d3dContext, destTexture, sourceTexture);
                         }
                         finally
                         {
-                            Marshal.ReleaseComObject(buffer);
+                            Marshal.Release(destTexture);
                         }
+
+                        // DXGI-backed buffers report zero length until told otherwise,
+                        // and the writer rejects zero-length samples.
+                        Mf.Check(buffer.SetCurrentLength((uint)(width * height * 4)));
                     }
                     finally
                     {
-                        Marshal.Release(sourceTexture);
+                        Marshal.ReleaseComObject(buffer);
                     }
 
                     stage = "timestamps";
@@ -366,25 +429,30 @@ internal sealed class CaptureEngine : IDisposable
         }
         catch (Exception ex)
         {
-            // An AV1 stream that dies before its first sample lands is not a glitch:
-            // the sink cannot write this encoder's headers, and every rebuilt engine
-            // fails identically (#7). Poison AV1 so the restart comes back on H264.
-            // Mid-stream failures are left alone — those are device losses, not codec
-            // mismatches, and H264 would not have survived them either.
-            if (Codec == Mf.VideoFormat_AV1 && framesInSegment == 0 && !av1Rejected)
-            {
-                av1Rejected = true;
-                AppLog.Write("AV1 failed before its first sample; H264 for the rest of this session");
-            }
+            Fail(stage, ex);
+        }
+    }
 
-            if (!errored)
-            {
-                errored = true;
-                // Full stack into the log: the field failures here are COM cast/RCW
-                // exceptions whose message alone cannot say WHICH call site died.
-                AppLog.Write($"engine error detail ({stage}): {ex}");
-                Error?.Invoke($"{stage}: {ex.Message}");
-            }
+    private void Fail(string stage, Exception ex)
+    {
+        // An AV1 stream that dies before its first sample lands is not a glitch:
+        // the sink cannot write this encoder's headers, and every rebuilt engine
+        // fails identically (#7). Poison AV1 so the restart comes back on H264.
+        // Mid-stream failures are left alone — those are device losses, not codec
+        // mismatches, and H264 would not have survived them either.
+        if (Codec == Mf.VideoFormat_AV1 && framesInSegment == 0 && !av1Rejected)
+        {
+            av1Rejected = true;
+            AppLog.Write("AV1 failed before its first sample; H264 for the rest of this session");
+        }
+
+        if (!errored)
+        {
+            errored = true;
+            // Full stack into the log: the field failures here are COM cast/RCW
+            // exceptions whose message alone cannot say WHICH call site died.
+            AppLog.Write($"engine error detail ({stage}): {ex}");
+            Error?.Invoke($"{stage}: {ex.Message}");
         }
     }
 
@@ -555,8 +623,11 @@ internal sealed class CaptureEngine : IDisposable
     {
         try
         {
-            session.Dispose();
-            framePool.Dispose();
+            // Frame delivery first: finalizing a writer that another thread is still
+            // writing into deadlocks in Media Foundation.
+            duplication?.Dispose();
+            session?.Dispose();
+            framePool?.Dispose();
         }
         catch
         {
@@ -613,7 +684,7 @@ internal sealed class CaptureEngine : IDisposable
     /// the 45 preceding methods buys nothing. Slot 47 (after IUnknown 0–2, then
     /// ID3D11DeviceChild's 4, then the 40 context methods preceding it), verified
     /// against d3d11.h.</summary>
-    private static unsafe void CopyResource(IntPtr context, IntPtr dest, IntPtr source)
+    internal static unsafe void CopyResource(IntPtr context, IntPtr dest, IntPtr source)
     {
         var vtbl = *(void***)context;
         ((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, IntPtr, void>)vtbl[47])(context, dest, source);

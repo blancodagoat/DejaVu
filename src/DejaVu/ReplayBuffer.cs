@@ -308,7 +308,9 @@ internal sealed class ReplayBuffer : IDisposable
             var (monitor, window) = ResolveTarget();
             try
             {
-                engine = new CaptureEngine(monitor, window, config.Fps, config.QualityValue);
+                engine = new CaptureEngine(
+                    monitor, window, config.Fps, config.QualityValue,
+                    duplicate: config.CaptureBackend == "duplication");
                 engineMonitor = monitor;
                 engineWindow = window;
                 engine.Error += OnEngineError;
@@ -330,7 +332,9 @@ internal sealed class ReplayBuffer : IDisposable
             }
 
             AppLog.Write($"buffering started: codec {(engine.Codec == Mf.VideoFormat_AV1 ? "AV1" : "H264")}, "
-                + $"target {(window != IntPtr.Zero ? "window" : "monitor")}, {config.Fps} fps, quality {config.QualityValue}");
+                + $"target {(window != IntPtr.Zero ? "window" : "monitor")}"
+                + $"{(engine.UsingDuplication ? " (duplication)" : string.Empty)}, "
+                + $"{config.Fps} fps, quality {config.QualityValue}");
 
             cycleTimer.Change(TimeSpan.FromSeconds(segmentSeconds), TimeSpan.FromSeconds(segmentSeconds));
         }

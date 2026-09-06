@@ -49,6 +49,7 @@ That's the entire app. There is no main window and nothing to set up; every sett
 | Capture | Auto (follows your game), any monitor, or one window |
 | Quality | Low / Medium / High. Constant-quality encoding: action gets the bits, menus cost almost nothing |
 | Frame rate | 30 to 240 fps, offered up to what your display can actually show |
+| Capture method | Windows Graphics Capture, or Desktop Duplication. Windows 10 paints a yellow border around anything the first one records and gives no way to turn it off; the second draws no border, at the cost of recording whole displays only |
 | System audio | On or off. The mic is never recorded |
 | Captured app audio only | On by default. With a window captured, the clip carries that app's audio alone, even when a virtual mixer like SteelSeries Sonar routes the app to its own output device |
 | Keep Discord out of clips | Applies to monitor capture; one click puts voice chat back into the mix |
@@ -58,6 +59,11 @@ That's the entire app. There is no main window and nothing to set up; every sett
 | Hotkey | Click-to-rebind dialog |
 | Corner indicator | Off, the red dot, or the app icon. It sits on the display being recorded, stays above fullscreen games, and never appears in your clips |
 | Notify about new versions | Off by default, so the app stays silent on the network. On, it asks GitHub a few times a day; on a scoop install, clicking the update balloon runs the whole update and restarts the app |
+
+> **Yellow border on Windows 10?** That is the OS telling you something is capturing the
+> screen, and Windows 10 has no setting for it. Switch *Capture method* to Desktop
+> Duplication in the tray menu — it records displays rather than single windows, and
+> draws no border.
 
 > **Admin games:** if the hotkey stops working while a game with anti-cheat has focus, hit *Restart as administrator* in the tray once. That's a Windows rule, not ours.
 
