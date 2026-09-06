@@ -22,6 +22,11 @@ internal sealed class ReplayBuffer : IDisposable
     private readonly object gate = new();
     private readonly System.Threading.Timer cycleTimer;
 
+    /// <summary>How long an engine start or teardown may block before it is abandoned.
+    /// Sized between the two: ~25x the normal segment finalize (~250 ms), and clear of
+    /// the 10 s shutdown watchdog in <see cref="Program"/> that Exit runs under.</summary>
+    private static readonly TimeSpan EngineOpTimeout = TimeSpan.FromSeconds(6);
+
     private CaptureEngine? engine;
     private IntPtr engineMonitor;
     private IntPtr engineWindow;
@@ -253,19 +258,38 @@ internal sealed class ReplayBuffer : IDisposable
     /// re-routes itself onto an MTA pool thread. Synchronous on purpose — callers read
     /// state (Running, saved path) right after.
     /// </summary>
-    private static void OnMta(Action work)
+    /// <remarks>
+    /// Bounded as well as confined, and always through the pool even when the caller is
+    /// already on it: a wedged Media Foundation call — WriteSample against an encoder
+    /// the driver dropped, Finalize_ against a hung MFT — never returns, and it holds
+    /// the engine's lock while it hangs. Every caller that waited on that lock inherited
+    /// the hang: save, pause, a settings change, and Exit (#4, #5), with the tray still
+    /// showing a healthy red dot because the status poll reads a volatile flag the
+    /// wedged thread never got to clear. Past the limit the engine is abandoned instead:
+    /// the in-flight segment is lost, everything already on disk still saves, and the
+    /// app answers again.
+    /// ponytail: abandoned engines are never reaped — one per wedge, and a wedge means
+    /// that encoder is gone anyway. Reap them if that stops being true.
+    /// </remarks>
+    internal static void OnMta(string what, Action work, TimeSpan? limit = null)
     {
-        if (Thread.CurrentThread.GetApartmentState() == ApartmentState.STA)
+        var task = Task.Run(work);
+        try
         {
-            Task.Run(work).GetAwaiter().GetResult();
+            if (!task.Wait(limit ?? EngineOpTimeout))
+            {
+                AppLog.Write($"{what} timed out; abandoning the capture engine");
+            }
         }
-        else
+        catch (AggregateException ex)
         {
-            work();
+            // Teardown throwing used to abort the save that asked for it, losing a clip
+            // whose segments were already safe on disk. Log and let the caller continue.
+            AppLog.Write($"{what} failed: {ex.InnerException?.Message ?? ex.Message}");
         }
     }
 
-    public void Start() => OnMta(StartCore);
+    public void Start() => OnMta("start", StartCore);
 
     private void StartCore()
     {
@@ -329,7 +353,7 @@ internal sealed class ReplayBuffer : IDisposable
         Stop();
     }
 
-    public void Stop() => OnMta(StopCore);
+    public void Stop() => OnMta("stop", StopCore);
 
     private void StopCore()
     {
