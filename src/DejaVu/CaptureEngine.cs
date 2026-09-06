@@ -19,6 +19,17 @@ internal sealed class CaptureEngine : IDisposable
     /// <summary>Probed once: a registered hardware AV1 encoder MFT.</summary>
     public static readonly bool Av1Available = ProbeAv1();
 
+    // The probe proves the machine has an AV1 encoder and decoder — not that the
+    // fragmented-MP4 sink can write what that encoder produces. Some stacks accept the
+    // sink writer, then fail every sample with "the sink could not create a valid output
+    // file because required headers were not provided" (#7), and the restart machinery
+    // rebuilt on AV1 forever. One failure poisons AV1 for the process.
+    private static volatile bool av1Rejected;
+
+    /// <summary>How long a rotation waits for the writer lock before calling the engine
+    /// dead. Rotation blocks on the previous segment's finalize, normally ~250 ms.</summary>
+    private static readonly TimeSpan RotateWait = TimeSpan.FromSeconds(3);
+
     private readonly int fps;
     private readonly int quality;
     private readonly int width;
@@ -71,7 +82,7 @@ internal sealed class CaptureEngine : IDisposable
         this.fps = fps;
         this.quality = quality;
         frameTicks = TimeSpan.TicksPerSecond / fps;
-        Codec = Av1Available ? Mf.VideoFormat_AV1 : Mf.VideoFormat_H264;
+        Codec = Av1Available && !av1Rejected ? Mf.VideoFormat_AV1 : Mf.VideoFormat_H264;
 
         Mf.EnsureStarted();
 
@@ -145,7 +156,10 @@ internal sealed class CaptureEngine : IDisposable
         }
         catch
         {
-            // Needs Win10 21H1+; older builds show the yellow capture border.
+            // Windows 11 (or Server 2022) only — the property does not exist below it,
+            // so Windows 10 shows the yellow capture border for as long as the buffer
+            // runs and there is no API to turn it off (#6). Only a Desktop Duplication
+            // capture path avoids it there.
         }
 
         framePool.FrameArrived += OnFrameArrived;
@@ -173,7 +187,17 @@ internal sealed class CaptureEngine : IDisposable
     {
         Mf.IMFSinkWriter? old;
         int frames;
-        lock (gate)
+        // Bounded, unlike the other holders of this gate: a WriteSample that never
+        // returns keeps it forever, and rotation runs on the buffer's cycle timer while
+        // the buffer's own lock is held — so an unbounded wait here froze the whole
+        // buffer, save and exit included (#5). Failing hands the engine to the caller's
+        // restart machinery, which rebuilds it.
+        if (!Monitor.TryEnter(gate, RotateWait))
+        {
+            throw new TimeoutException("the encoder stopped responding");
+        }
+
+        try
         {
             old = writer;
             frames = framesInSegment;
@@ -183,6 +207,10 @@ internal sealed class CaptureEngine : IDisposable
             // One report per segment, not per engine: without the reset, an engine
             // that errored once cycles on mute until something else kills it.
             errored = false;
+        }
+        finally
+        {
+            Monitor.Exit(gate);
         }
 
         if (old is not null)
@@ -338,6 +366,17 @@ internal sealed class CaptureEngine : IDisposable
         }
         catch (Exception ex)
         {
+            // An AV1 stream that dies before its first sample lands is not a glitch:
+            // the sink cannot write this encoder's headers, and every rebuilt engine
+            // fails identically (#7). Poison AV1 so the restart comes back on H264.
+            // Mid-stream failures are left alone — those are device losses, not codec
+            // mismatches, and H264 would not have survived them either.
+            if (Codec == Mf.VideoFormat_AV1 && framesInSegment == 0 && !av1Rejected)
+            {
+                av1Rejected = true;
+                AppLog.Write("AV1 failed before its first sample; H264 for the rest of this session");
+            }
+
             if (!errored)
             {
                 errored = true;
@@ -361,6 +400,7 @@ internal sealed class CaptureEngine : IDisposable
             // H.264 is the universal fallback — sticky, so every later segment in the
             // buffer matches and the mux never sees mixed codecs.
             AppLog.Write("AV1 encoder rejected the stream; falling back to H264");
+            av1Rejected = true;
             Codec = Mf.VideoFormat_H264;
             return CreateWriterFor(path, Codec);
         }

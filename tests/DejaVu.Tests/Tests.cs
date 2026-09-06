@@ -269,6 +269,21 @@ Check("parse is case/space tolerant",
     HotkeyBinding.TryParse(" alt + f10 ", out var sloppy) && sloppy == HotkeyBinding.DefaultSave);
 Check("modifier-only rejected", !HotkeyBinding.TryParse("Ctrl+Shift", out _));
 
+// Engine work is bounded: a Media Foundation call that never returns must not take the
+// save, the pause toggle or Exit down with it (#4, #5).
+var wedged = new SemaphoreSlim(0);
+var boundedClock = System.Diagnostics.Stopwatch.StartNew();
+ReplayBuffer.OnMta("wedged", () => wedged.Wait(), TimeSpan.FromMilliseconds(300));
+Check("wedged engine work is abandoned, not waited on",
+    boundedClock.Elapsed < TimeSpan.FromSeconds(3), $"took {boundedClock.ElapsedMilliseconds} ms");
+wedged.Release();
+
+boundedClock.Restart();
+ReplayBuffer.OnMta("throwing", () => throw new InvalidOperationException("teardown blew up"),
+    TimeSpan.FromSeconds(5));
+Check("a throwing teardown is logged, not rethrown into the save",
+    boundedClock.Elapsed < TimeSpan.FromSeconds(3), $"took {boundedClock.ElapsedMilliseconds} ms");
+
 // Segment name round trip
 var t = new DateTime(2026, 8, 11, 14, 30, 52, 123);
 var name = $"seg_{t:yyyyMMdd_HHmmssfff}.mp4";
