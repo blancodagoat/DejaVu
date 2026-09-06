@@ -183,6 +183,14 @@ internal sealed class TrayContext : ApplicationContext
             () => config.Quality, q => { config.Quality = q; buffer.Restart(); }));
         menu.Items.Add(Choice("Frame rate", AppConfig.FpsChoices, f => $"{f} fps",
             () => config.Fps, f => { config.Fps = f; buffer.Restart(); }));
+        // Windows 10 paints a yellow border around anything Windows.Graphics.Capture
+        // records and offers no API to turn it off (#6). Desktop Duplication predates
+        // that indicator, at the cost of recording whole displays only — a window
+        // target keeps using WGC whichever is selected here.
+        menu.Items.Add(Choice("Capture method", new[] { "wgc", "duplication" },
+            b => b == "duplication" ? "Desktop Duplication (no border)" : "Windows Graphics Capture",
+            () => config.CaptureBackend,
+            b => { config.CaptureBackend = b; buffer.Restart(); }));
         menu.Items.Add(Choice("Clip folder cap", AppConfig.ClipCapChoices,
             g => g == 0 ? "Off" : $"{g} GB",
             () => config.ClipCapGB, g => config.ClipCapGB = g));

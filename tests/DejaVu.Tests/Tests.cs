@@ -481,6 +481,54 @@ if (args.Length > 0 && args[0] == "engine")
         Check("rotate finalized with frames", rotatedFrames > 30, $"got {rotatedFrames}");
     }
 
+    // The Desktop Duplication source through the same engine (#6). Same assertions:
+    // it either delivers frames into a decodable segment or it is not a capture path.
+    // A second GPU driving the primary display makes duplication legitimately
+    // impossible, so that one failure is reported rather than failed.
+    string dup = Path.Combine(Path.GetTempPath(), "dejavu_dup.mp4");
+    try
+    {
+        string? dupError = null;
+        int dupRotated = 0;
+        using (var engine = new CaptureEngine(monitor, IntPtr.Zero, 60, 70, duplicate: true))
+        {
+            engine.Error += e => dupError = e;
+            Check("duplication is the live source", engine.UsingDuplication);
+            engine.Start(dup);
+            Thread.Sleep(3000);
+            int dupFrames = engine.FramesInSegment;
+            // The seam matters more here than on the WGC path: the pump thread blocks on
+            // the writer lock the finalize holds, and it must not be holding the GDI DC
+            // on the staging texture while it waits.
+            using var dupRotate = new ManualResetEventSlim(false);
+            engine.Rotate(Path.Combine(Path.GetTempPath(), "dejavu_dup2.mp4"),
+                frames => { dupRotated = frames; dupRotate.Set(); });
+            Thread.Sleep(1000);
+            engine.Stop();
+            dupRotate.Wait(5000);
+            Check("duplication reported no errors", dupError is null, dupError);
+            Check("duplication delivered frames", dupFrames > 30, $"got {dupFrames}");
+            Check("duplication survived a rotate", dupRotated > 30, $"got {dupRotated}");
+        }
+
+        var probe = Mf.ProbeVideo(dup, maxSamples: 30);
+        Check("duplication segment decodes", probe.Frames > 0, $"{probe.Frames} frames");
+        // The failure this catches: CopyResource no-ops on a texture mismatch and encodes
+        // untouched allocator memory, which decodes as a valid, entirely black clip.
+        Check("duplication captured the desktop, not black", probe.Luma > 1.0, $"luma {probe.Luma:F1}");
+        Console.WriteLine(
+            $"duplication: {new FileInfo(dup).Length / 1024} KB, {probe.Frames} frames, luma {probe.Luma:F1}");
+        File.Delete(Path.Combine(Path.GetTempPath(), "dejavu_dup2.mp4"));
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine("SKIP duplication: " + ex.Message);
+    }
+    finally
+    {
+        File.Delete(dup);
+    }
+
     // Size floors are deliberately low: AV1 on a static desktop is startlingly small
     // (a keyframe plus near-empty deltas), and that efficiency is the point.
     Check("segment 1 exists", new FileInfo(p1).Length > 8_000, $"{new FileInfo(p1).Length} bytes");

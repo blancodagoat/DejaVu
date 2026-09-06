@@ -23,6 +23,7 @@ internal sealed class ConfigFile
     public bool? SystemAudio { get; set; }
     public int? ClipCapGB { get; set; }
     public string? CaptureTarget { get; set; }
+    public string? CaptureBackend { get; set; }
     public string[]? AudioExclude { get; set; }
     public bool? AppAudioOnly { get; set; }
     public bool? SaveSound { get; set; }
@@ -75,6 +76,14 @@ internal sealed class AppConfig
     /// <summary>"auto" follows the display of the active window; otherwise a GDI device
     /// name such as \\.\DISPLAY2 pins one monitor.</summary>
     public string CaptureTarget { get; set; } = "auto";
+
+    /// <summary>
+    /// "wgc" (Windows.Graphics.Capture) or "duplication" (DXGI Desktop Duplication).
+    /// WGC is the default and the only one that can record a single window; duplication
+    /// records displays only, and is the sole way to lose the yellow capture border on
+    /// Windows 10, where the API that hides it does not exist (#6).
+    /// </summary>
+    public string CaptureBackend { get; set; } = "wgc";
 
     /// <summary>True when no config existed on disk — the app's very first launch.</summary>
     public bool FirstRun { get; private set; }
@@ -201,6 +210,7 @@ internal sealed class AppConfig
                     config.ClipCapGB = Math.Max(0, file.ClipCapGB ?? 0);
                     config.CaptureTarget = string.IsNullOrWhiteSpace(file.CaptureTarget)
                         ? "auto" : file.CaptureTarget;
+                    config.CaptureBackend = file.CaptureBackend == "duplication" ? "duplication" : "wgc";
                     if (file.AudioExclude is not null)
                     {
                         config.AudioExclude = file.AudioExclude;
@@ -211,7 +221,7 @@ internal sealed class AppConfig
                     config.UpdateNotify = file.UpdateNotify ?? false;
 
                     rewrite |= file.ShowIndicator is null || file.IndicatorStyle is null || file.SystemAudio is null
-                        || file.ClipCapGB is null || file.CaptureTarget is null
+                        || file.ClipCapGB is null || file.CaptureTarget is null || file.CaptureBackend is null
                         || file.AudioExclude is null || file.AppAudioOnly is null || file.SaveSound is null
                         || file.UpdateNotify is null;
                 }
@@ -247,6 +257,7 @@ internal sealed class AppConfig
                 SystemAudio = SystemAudio,
                 ClipCapGB = ClipCapGB,
                 CaptureTarget = CaptureTarget,
+                CaptureBackend = CaptureBackend,
                 AudioExclude = AudioExclude,
                 AppAudioOnly = AppAudioOnly,
                 SaveSound = SaveSound,
