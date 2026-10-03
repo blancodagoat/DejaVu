@@ -12,6 +12,7 @@ namespace DejaVu;
 /// PCM is encoded to AAC on the fly through a Media Foundation sink writer, one file per
 /// buffer segment; silence is synthesized whenever the system renders nothing, because
 /// loopback delivers no packets then and the AAC timeline must stay continuous.
+/// The default microphone, when opted in, is mixed into that same stream.
 /// </summary>
 internal sealed class AudioLoopback : IDisposable
 {
@@ -27,8 +28,15 @@ internal sealed class AudioLoopback : IDisposable
     private const uint AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY = 0x08000000;
     private const uint AUDCLNT_BUFFERFLAGS_SILENT = 0x2;
 
-    private readonly IAudioClient client;
-    private readonly IAudioCaptureClient capture;
+    // Mic backlog bounds, in frames: mixing starts once a cushion has built up, and
+    // the backlog is trimmed back to it when the mic's clock runs ahead of render's.
+    private const int MicPrimeFrames = SampleRate * 3 / 100;
+    private const int MicMaxFrames = SampleRate / 5;
+
+    private readonly IAudioClient? client;
+    private readonly IAudioCaptureClient? capture;
+    private readonly IAudioClient? micClient;
+    private readonly IAudioCaptureClient? micCapture;
     private readonly Mf.IMFSinkWriter writer;
     private readonly int streamIndex;
     private readonly Thread pump;
@@ -40,15 +48,25 @@ internal sealed class AudioLoopback : IDisposable
     private volatile bool stopping;
     private bool finalized;
     private bool deviceErrorLogged;
+    private bool micErrorLogged;
+
+    // Interleaved mic samples not yet mixed. Pump thread only, like the writer.
+    private readonly short[]? micRing;
+    private int micHead;
+    private int micCount;
+    private bool micPrimed;
+    private short[] mixScratch = [];
 
     /// <summary>Null when audio capture is unavailable; the caller records silent video.
     /// With <paramref name="includeOnly"/> the pid's tree is the whole mix instead of the
-    /// one part left out — "captured app audio only".</summary>
-    public static AudioLoopback? TryStart(string outputPath, int pid, bool includeOnly = false)
+    /// one part left out — "captured app audio only". <paramref name="system"/> off with
+    /// <paramref name="mic"/> on records the microphone alone.</summary>
+    public static AudioLoopback? TryStart(
+        string outputPath, int pid, bool includeOnly = false, bool system = true, bool mic = false)
     {
         try
         {
-            return new AudioLoopback(outputPath, pid, includeOnly);
+            return new AudioLoopback(outputPath, pid, includeOnly, system, mic);
         }
         catch (Exception ex)
         {
@@ -63,85 +81,92 @@ internal sealed class AudioLoopback : IDisposable
     /// unreadable without knowing which path a session used.</summary>
     public string Route { get; }
 
-    private AudioLoopback(string outputPath, int pid, bool includeOnly)
+    private AudioLoopback(string outputPath, int pid, bool includeOnly, bool system, bool mic)
     {
         Mf.EnsureStarted();
 
         // Device first, writer last: activation is the step that fails on machines with
         // no working endpoint, and creating the sink writer before it leaked one writer
         // plus one locked zero-byte aud_*.mp4 per segment, forever, on those boxes.
-        bool vad = false;
-        if (pid > 0 && includeOnly)
-        {
-            // Per-app routing (SteelSeries Sonar/GG, Windows' per-app output devices)
-            // moves the app's session to its own endpoint, where the process-loopback
-            // virtual device hears NOTHING — measured dead silence against a game
-            // routed by GG. The endpoint hosting the app's session is the truth: on
-            // routed setups its mix IS the app (the mixer already keeps voice and mic
-            // on other endpoints), and only when the app shares the default device is
-            // the include-tree VAD both correct and necessary.
-            var routed = FindSessionDevice(pid);
-            if (routed is { IsDefault: false } home)
-            {
-                Route = $"app-only via the app's output device (pid {pid})";
-                client = ActivateDeviceLoopback(home.Device);
-            }
-            else
-            {
-                Route = routed is null
-                    ? $"app-only via process loopback (pid {pid}; no live session found yet)"
-                    : $"app-only via process loopback (pid {pid})";
-                vad = true;
-                client = ActivateProcessLoopback(pid, LoopbackModeIncludeTree);
-            }
-        }
-        else if (pid > 0)
-        {
-            Route = $"system mix excluding pid {pid}";
-            vad = true;
-            client = ActivateProcessLoopback(pid, LoopbackModeExcludeTree);
-        }
-        else
-        {
-            Route = "full system mix (default device)";
-            client = ActivateEndpointLoopback();
-        }
-
-        var format = Marshal.AllocHGlobal(18);
+        Route = "microphone only";
         try
         {
-            // WAVEFORMATEX: PCM, stereo, 48 kHz, 16-bit, no extra bytes.
-            Marshal.WriteInt16(format, 0, 1);
-            Marshal.WriteInt16(format, 2, Channels);
-            Marshal.WriteInt32(format, 4, SampleRate);
-            Marshal.WriteInt32(format, 8, BytesPerSecond);
-            Marshal.WriteInt16(format, 12, BlockAlign);
-            Marshal.WriteInt16(format, 14, BitsPerSample);
-            Marshal.WriteInt16(format, 16, 0);
-
-            uint flags = AUDCLNT_STREAMFLAGS_LOOPBACK;
-            if (!vad)
+            if (system)
             {
-                // Endpoint paths must accept our fixed format; the process-loopback
-                // virtual device takes the requested format as-is.
-                flags |= AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+                bool vad = false;
+                if (pid > 0 && includeOnly)
+                {
+                    // Per-app routing (SteelSeries Sonar/GG, Windows' per-app output devices)
+                    // moves the app's session to its own endpoint, where the process-loopback
+                    // virtual device hears NOTHING — measured dead silence against a game
+                    // routed by GG. The endpoint hosting the app's session is the truth: on
+                    // routed setups its mix IS the app (the mixer already keeps voice and mic
+                    // on other endpoints), and only when the app shares the default device is
+                    // the include-tree VAD both correct and necessary.
+                    var routed = FindSessionDevice(pid);
+                    if (routed is { IsDefault: false } home)
+                    {
+                        Route = $"app-only via the app's output device (pid {pid})";
+                        client = ActivateDevice(home.Device);
+                    }
+                    else
+                    {
+                        Route = routed is null
+                            ? $"app-only via process loopback (pid {pid}; no live session found yet)"
+                            : $"app-only via process loopback (pid {pid})";
+                        vad = true;
+                        client = ActivateProcessLoopback(pid, LoopbackModeIncludeTree);
+                    }
+                }
+                else if (pid > 0)
+                {
+                    Route = $"system mix excluding pid {pid}";
+                    vad = true;
+                    client = ActivateProcessLoopback(pid, LoopbackModeExcludeTree);
+                }
+                else
+                {
+                    Route = "full system mix (default device)";
+                    client = ActivateDefaultEndpoint(0 /* eRender */);
+                }
+
+                uint flags = AUDCLNT_STREAMFLAGS_LOOPBACK;
+                if (!vad)
+                {
+                    // Endpoint paths must accept our fixed format; the process-loopback
+                    // virtual device takes the requested format as-is.
+                    flags |= AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+                }
+
+                capture = InitializeCapture(client, flags);
             }
 
-            Mf.Check(client.Initialize(
-                AUDCLNT_SHAREMODE_SHARED, flags, 2_000_000, 0, format, IntPtr.Zero));
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(format);
-        }
+            if (mic)
+            {
+                try
+                {
+                    micClient = ActivateDefaultEndpoint(1 /* eCapture */);
+                    micCapture = InitializeCapture(
+                        micClient, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY);
+                    micRing = new short[SampleRate / 2 * Channels];
+                    if (system)
+                    {
+                        Route += " + microphone";
+                    }
+                }
+                catch (Exception ex) when (system)
+                {
+                    // The mic is the extra: a missing one, or Windows' privacy switch
+                    // denying desktop apps, must not cost the clip its game audio.
+                    AppLog.Write("microphone unavailable: " + ex.Message);
+                    if (micClient is not null)
+                    {
+                        Marshal.ReleaseComObject(micClient);
+                        micClient = null;
+                    }
+                }
+            }
 
-        var captureIid = IID_IAudioCaptureClient;
-        Mf.Check(client.GetService(ref captureIid, out var capturePtr));
-        capture = (IAudioCaptureClient)Marshal.GetObjectForIUnknown(capturePtr);
-        Marshal.Release(capturePtr);
-
-        try
-        {
             // Same throttling opt-out as every other writer in the app: the sink
             // writer's pacing was caught blocking in a memory dump once already, and
             // the resync path below can burst a second of silence at a time.
@@ -172,24 +197,70 @@ internal sealed class AudioLoopback : IDisposable
                 Marshal.ReleaseComObject(aac);
                 Marshal.ReleaseComObject(pcm);
             }
+
+            if (client is not null)
+            {
+                Mf.Check(client.Start());
+            }
+
+            if (micClient is not null)
+            {
+                Mf.Check(micClient.Start());
+            }
         }
         catch
         {
-            if (writer is not null)
-            {
-                Marshal.ReleaseComObject(writer);
-            }
-
-            Marshal.ReleaseComObject(capture);
-            Marshal.ReleaseComObject(client);
+            ReleaseIfSet(writer);
+            ReleaseIfSet(micCapture);
+            ReleaseIfSet(micClient);
+            ReleaseIfSet(capture);
+            ReleaseIfSet(client);
             throw;
         }
 
-        Mf.Check(client.Start());
         clock.Start();
 
         pump = new Thread(Pump) { IsBackground = true, Name = "DejaVu audio pump" };
         pump.Start();
+    }
+
+    private static void ReleaseIfSet(object? com)
+    {
+        if (com is not null)
+        {
+            Marshal.ReleaseComObject(com);
+        }
+    }
+
+    /// <summary>Initializes <paramref name="client"/> for our fixed PCM format and
+    /// returns its capture service.</summary>
+    private static IAudioCaptureClient InitializeCapture(IAudioClient client, uint flags)
+    {
+        var format = Marshal.AllocHGlobal(18);
+        try
+        {
+            // WAVEFORMATEX: PCM, stereo, 48 kHz, 16-bit, no extra bytes.
+            Marshal.WriteInt16(format, 0, 1);
+            Marshal.WriteInt16(format, 2, Channels);
+            Marshal.WriteInt32(format, 4, SampleRate);
+            Marshal.WriteInt32(format, 8, BytesPerSecond);
+            Marshal.WriteInt16(format, 12, BlockAlign);
+            Marshal.WriteInt16(format, 14, BitsPerSample);
+            Marshal.WriteInt16(format, 16, 0);
+
+            Mf.Check(client.Initialize(
+                AUDCLNT_SHAREMODE_SHARED, flags, 2_000_000, 0, format, IntPtr.Zero));
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(format);
+        }
+
+        var captureIid = IID_IAudioCaptureClient;
+        Mf.Check(client.GetService(ref captureIid, out var capturePtr));
+        var capture = (IAudioCaptureClient)Marshal.GetObjectForIUnknown(capturePtr);
+        Marshal.Release(capturePtr);
+        return capture;
     }
 
     private void Pump()
@@ -199,7 +270,17 @@ internal sealed class AudioLoopback : IDisposable
             while (!stopping)
             {
                 Thread.Sleep(10);
-                Drain();
+
+                // Mic first, so the frames written next have its newest samples to mix.
+                if (micCapture is not null)
+                {
+                    Drain(micCapture, mic: true);
+                }
+
+                if (capture is not null)
+                {
+                    Drain(capture, mic: false);
+                }
 
                 // Loopback goes quiet when nothing renders; keep the timeline continuous.
                 // Lag up to ~20 ms is packet jitter, anything beyond becomes silence.
@@ -232,14 +313,14 @@ internal sealed class AudioLoopback : IDisposable
         }
     }
 
-    private void Drain()
+    private void Drain(IAudioCaptureClient source, bool mic)
     {
         while (true)
         {
-            int hr = capture.GetNextPacketSize(out uint packet);
+            int hr = source.GetNextPacketSize(out uint packet);
             if (hr < 0)
             {
-                LogDeviceError("GetNextPacketSize", hr);
+                LogDeviceError("GetNextPacketSize", hr, mic);
                 return;
             }
 
@@ -248,10 +329,10 @@ internal sealed class AudioLoopback : IDisposable
                 return;
             }
 
-            hr = capture.GetBuffer(out var data, out uint frames, out uint flags, out _, out _);
+            hr = source.GetBuffer(out var data, out uint frames, out uint flags, out _, out _);
             if (hr < 0)
             {
-                LogDeviceError("GetBuffer", hr);
+                LogDeviceError("GetBuffer", hr, mic);
                 return;
             }
 
@@ -259,35 +340,132 @@ internal sealed class AudioLoopback : IDisposable
             {
                 // A phantom packet (driver reports a size it cannot hand over) would
                 // otherwise spin this loop at 100% CPU.
-                capture.ReleaseBuffer(0);
+                source.ReleaseBuffer(0);
                 return;
             }
 
             bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
-            WriteFrames(silent ? IntPtr.Zero : data, (int)frames);
-            capture.ReleaseBuffer(frames);
+            if (mic)
+            {
+                QueueMic(silent ? IntPtr.Zero : data, (int)frames);
+            }
+            else
+            {
+                WriteFrames(silent ? IntPtr.Zero : data, (int)frames);
+            }
+
+            source.ReleaseBuffer(frames);
         }
     }
 
     /// <summary>Once per instance: a dead device (unplugged, default switched, driver
     /// restart) fails every call until the next segment builds a fresh capture, and the
     /// old behavior — synthesize silence, say nothing — was undiagnosable in the field.</summary>
-    private void LogDeviceError(string call, int hr)
+    private void LogDeviceError(string call, int hr, bool mic)
     {
-        if (!deviceErrorLogged)
+        ref bool logged = ref mic ? ref micErrorLogged : ref deviceErrorLogged;
+        if (!logged)
         {
-            deviceErrorLogged = true;
-            AppLog.Write($"audio device error: {call} 0x{hr:X8}; silence until the next segment");
+            logged = true;
+            AppLog.Write($"{(mic ? "microphone" : "audio")} device error: {call} 0x{hr:X8}; silence until the next segment");
         }
     }
 
-    private void WriteFrames(IntPtr data, int frames)
+    private unsafe void QueueMic(IntPtr data, int frames)
+    {
+        var ring = micRing!;
+        int samples = frames * Channels;
+        var source = data == IntPtr.Zero ? default : new ReadOnlySpan<short>((void*)data, samples);
+        for (int i = 0; i < samples; i++)
+        {
+            ring[(micHead + micCount) % ring.Length] = source.IsEmpty ? (short)0 : source[i];
+            if (micCount < ring.Length)
+            {
+                micCount++;
+            }
+            else
+            {
+                micHead = (micHead + 1) % ring.Length;
+            }
+        }
+
+        // ponytail: mic and render clocks drift apart, and trimming the backlog back to
+        // the cushion clicks once in a while. Resample the mic if anyone ever hears it.
+        if (micCount > MicMaxFrames * Channels)
+        {
+            int drop = micCount - MicPrimeFrames * Channels;
+            micHead = (micHead + drop) % ring.Length;
+            micCount -= drop;
+        }
+    }
+
+    /// <summary>Adds queued mic samples into <paramref name="mix"/>, saturating.</summary>
+    private void MixMic(Span<short> mix)
+    {
+        if (!micPrimed)
+        {
+            if (micCount < MicPrimeFrames * Channels)
+            {
+                return;
+            }
+
+            micPrimed = true;
+        }
+
+        var ring = micRing!;
+        int n = Math.Min(mix.Length, micCount);
+        for (int i = 0; i < n; i++)
+        {
+            mix[i] = (short)Math.Clamp(mix[i] + ring[micHead], short.MinValue, short.MaxValue);
+            micHead = (micHead + 1) % ring.Length;
+        }
+
+        micCount -= n;
+        if (n < mix.Length)
+        {
+            // Underrun: rebuild the cushion instead of stuttering on every packet.
+            micPrimed = false;
+        }
+    }
+
+    private unsafe void WriteFrames(IntPtr data, int frames)
     {
         if (frames <= 0)
         {
             return;
         }
 
+        if (micRing is null)
+        {
+            Emit(data, frames);
+            return;
+        }
+
+        int samples = frames * Channels;
+        if (mixScratch.Length < samples)
+        {
+            mixScratch = new short[samples];
+        }
+
+        var mix = mixScratch.AsSpan(0, samples);
+        if (data == IntPtr.Zero)
+        {
+            mix.Clear();
+        }
+        else
+        {
+            new ReadOnlySpan<short>((void*)data, samples).CopyTo(mix);
+        }
+
+        MixMic(mix);
+        fixed (short* p = mix)
+        {
+            Emit((IntPtr)p, frames);
+        }
+    }
+
+    private void Emit(IntPtr data, int frames)
+    {
         Mf.WritePcm(
             writer, streamIndex, data, frames * BlockAlign,
             writtenFrames * 10_000_000L / SampleRate,
@@ -313,7 +491,8 @@ internal sealed class AudioLoopback : IDisposable
             return;
         }
 
-        if (synthesizedFrames > 0 && writtenFrames > SampleRate
+        // Without system audio every frame is synthesized by design; nothing to report.
+        if (capture is not null && synthesizedFrames > 0 && writtenFrames > SampleRate
             && synthesizedFrames * 10 >= writtenFrames * 9)
         {
             AppLog.Write($"audio was {synthesizedFrames * 100 / writtenFrames}% synthesized silence this segment");
@@ -321,8 +500,18 @@ internal sealed class AudioLoopback : IDisposable
 
         try
         {
-            client.Stop();
-            Drain();
+            client?.Stop();
+            micClient?.Stop();
+            if (micCapture is not null)
+            {
+                Drain(micCapture, mic: true);
+            }
+
+            if (capture is not null)
+            {
+                Drain(capture, mic: false);
+            }
+
             Mf.Check(writer.Finalize_());
         }
         catch
@@ -331,8 +520,10 @@ internal sealed class AudioLoopback : IDisposable
         }
         finally
         {
-            Marshal.ReleaseComObject(capture);
-            Marshal.ReleaseComObject(client);
+            ReleaseIfSet(micCapture);
+            ReleaseIfSet(micClient);
+            ReleaseIfSet(capture);
+            ReleaseIfSet(client);
             Marshal.ReleaseComObject(writer);
         }
     }
@@ -401,15 +592,15 @@ internal sealed class AudioLoopback : IDisposable
         return (IMMDeviceEnumerator)Activator.CreateInstance(enumeratorType)!;
     }
 
-    private static IAudioClient ActivateEndpointLoopback()
+    private static IAudioClient ActivateDefaultEndpoint(int dataFlow)
     {
         var enumerator = CreateDeviceEnumerator();
         try
         {
-            Mf.Check(enumerator.GetDefaultAudioEndpoint(0 /* eRender */, 0 /* eConsole */, out var device));
+            Mf.Check(enumerator.GetDefaultAudioEndpoint(dataFlow, 0 /* eConsole */, out var device));
             try
             {
-                return ActivateDeviceLoopback(device, release: false);
+                return ActivateDevice(device, release: false);
             }
             finally
             {
@@ -422,9 +613,9 @@ internal sealed class AudioLoopback : IDisposable
         }
     }
 
-    /// <summary>Loopback client for a specific render device. Takes ownership of
+    /// <summary>Audio client for a specific device. Takes ownership of
     /// <paramref name="device"/> unless <paramref name="release"/> is false.</summary>
-    private static IAudioClient ActivateDeviceLoopback(IMMDevice device, bool release = true)
+    private static IAudioClient ActivateDevice(IMMDevice device, bool release = true)
     {
         try
         {
