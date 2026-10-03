@@ -21,6 +21,7 @@ internal sealed class ConfigFile
     public bool? ShowIndicator { get; set; }
     public string? IndicatorStyle { get; set; }
     public bool? SystemAudio { get; set; }
+    public bool? Microphone { get; set; }
     public int? ClipCapGB { get; set; }
     public string? CaptureTarget { get; set; }
     public string? CaptureBackend { get; set; }
@@ -69,6 +70,10 @@ internal sealed class AppConfig
     public string IndicatorStyle { get; set; } = "dot";
 
     public bool SystemAudio { get; set; } = true;
+
+    /// <summary>Mix the default microphone into replays. Off by default: a hot mic in
+    /// every clip is the kind of surprise nobody forgives.</summary>
+    public bool Microphone { get; set; }
 
     /// <summary>Rolling cap on the saved-clips folder in GB; 0 means never delete.</summary>
     public int ClipCapGB { get; set; }
@@ -207,6 +212,7 @@ internal sealed class AppConfig
                     config.ShowIndicator = file.ShowIndicator ?? true;
                     config.IndicatorStyle = file.IndicatorStyle is "dot" or "icon" ? file.IndicatorStyle : "dot";
                     config.SystemAudio = file.SystemAudio ?? true;
+                    config.Microphone = file.Microphone ?? false;
                     config.ClipCapGB = Math.Max(0, file.ClipCapGB ?? 0);
                     config.CaptureTarget = string.IsNullOrWhiteSpace(file.CaptureTarget)
                         ? "auto" : file.CaptureTarget;
@@ -223,7 +229,7 @@ internal sealed class AppConfig
                     rewrite |= file.ShowIndicator is null || file.IndicatorStyle is null || file.SystemAudio is null
                         || file.ClipCapGB is null || file.CaptureTarget is null || file.CaptureBackend is null
                         || file.AudioExclude is null || file.AppAudioOnly is null || file.SaveSound is null
-                        || file.UpdateNotify is null;
+                        || file.UpdateNotify is null || file.Microphone is null;
                 }
             }
         }
@@ -255,6 +261,7 @@ internal sealed class AppConfig
                 ShowIndicator = ShowIndicator,
                 IndicatorStyle = IndicatorStyle,
                 SystemAudio = SystemAudio,
+                Microphone = Microphone,
                 ClipCapGB = ClipCapGB,
                 CaptureTarget = CaptureTarget,
                 CaptureBackend = CaptureBackend,

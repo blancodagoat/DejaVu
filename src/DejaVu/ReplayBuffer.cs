@@ -430,7 +430,7 @@ internal sealed class ReplayBuffer : IDisposable
     /// seconds, and holding the gate through it freezes the tray menu and hotkey saves.</summary>
     private void StartAudio()
     {
-        if (!config.SystemAudio)
+        if (!config.SystemAudio && !config.Microphone)
         {
             return;
         }
@@ -458,11 +458,13 @@ internal sealed class ReplayBuffer : IDisposable
             AudioLoopback? audio;
             if (config.AppAudioOnly && window != IntPtr.Zero)
             {
-                audio = AudioLoopback.TryStart(path!, ResolveAudioPid(window), includeOnly: true);
+                audio = AudioLoopback.TryStart(path!, ResolveAudioPid(window), includeOnly: true,
+                    system: config.SystemAudio, mic: config.Microphone);
             }
             else
             {
-                audio = AudioLoopback.TryStart(path!, FindExcludePid());
+                audio = AudioLoopback.TryStart(path!, FindExcludePid(),
+                    system: config.SystemAudio, mic: config.Microphone);
             }
 
             bool warn;
