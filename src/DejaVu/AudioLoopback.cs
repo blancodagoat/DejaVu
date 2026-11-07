@@ -28,6 +28,29 @@ internal sealed class AudioLoopback : IDisposable
     private const uint AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM = 0x80000000;
     private const uint AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY = 0x08000000;
     private const uint AUDCLNT_BUFFERFLAGS_SILENT = 0x2;
+    private const uint AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR = 0x4;
+    private const int AUDCLNT_E_DEVICE_INVALIDATED = unchecked((int)0x88890004);
+
+#if DEBUG
+#pragma warning disable CS0649 // set by the test harness, which compiles this file in
+    /// <summary>Debug builds only, for the live device-loss test: the extra device with
+    /// this endpoint ID fails its next read with AUDCLNT_E_DEVICE_INVALIDATED, exactly
+    /// what an unplug or a Sonar restart does mid-segment. Cleared once it fires.</summary>
+    internal static volatile string? DebugInvalidateExtra;
+
+    /// <summary>Debug builds only: the extra device with this endpoint ID reads as
+    /// unplugged when a segment opens it, until cleared.</summary>
+    internal static volatile string? DebugUnpluggedExtra;
+
+    /// <summary>Debug builds only: app-only capture always takes process loopback, even
+    /// when the app's session sits on another device. For probing what that path hears.</summary>
+    internal static volatile bool DebugForceProcessLoopback;
+
+    /// <summary>Debug builds only: the running capture acts as if Windows had just made
+    /// this endpoint ID the default playback device. Cleared once handled.</summary>
+    internal static volatile string? DebugDefaultChanged;
+#pragma warning restore CS0649
+#endif
 
     // Mic backlog bounds, in frames: mixing starts once a cushion has built up, and
     // the backlog is trimmed back to it when the mic's clock runs ahead of render's.
@@ -53,6 +76,17 @@ internal sealed class AudioLoopback : IDisposable
 
     // Extra render devices recorded whole and mixed in (#11), each on its own clock.
     private readonly List<ExtraDevice> extras = [];
+
+    // Capture time (QPC seconds) of the next main-stream frame written, from the main
+    // packets' own timestamps; NaN when the route gives none. The extras are held a
+    // fixed delay behind it.
+    private double mainNextTime = double.NaN;
+
+    // Process loopback hears every output device: a default change moves sound the
+    // extras already record into the main stream. Set from the notification thread.
+    private bool mainHearsEveryDevice;
+    private volatile string? defaultChangedTo;
+    private DefaultWatcher? watcher;
 
     // Interleaved mic samples not yet mixed. Pump thread only, like the writer.
     private readonly short[]? micRing;
@@ -110,6 +144,7 @@ internal sealed class AudioLoopback : IDisposable
                 // same one is not mixed in twice.
                 string? mainDeviceId = DefaultRenderId();
                 bool vad = false;
+                int excludedPid = 0;
                 if (pid > 0 && includeOnly)
                 {
                     // Per-app routing (SteelSeries Sonar/GG, Windows' per-app output devices)
@@ -120,6 +155,13 @@ internal sealed class AudioLoopback : IDisposable
                     // on other endpoints), and only when the app shares the default device is
                     // the include-tree VAD both correct and necessary.
                     var routed = FindSessionDevice(pid);
+#if DEBUG
+                    if (DebugForceProcessLoopback && routed is { } skipped)
+                    {
+                        Marshal.ReleaseComObject(skipped.Device);
+                        routed = null;
+                    }
+#endif
                     if (routed is { IsDefault: false } home)
                     {
                         Route = $"app-only via the app's output device (pid {pid})";
@@ -139,6 +181,7 @@ internal sealed class AudioLoopback : IDisposable
                 {
                     Route = $"system mix excluding pid {pid}";
                     vad = true;
+                    excludedPid = pid;
                     client = ActivateProcessLoopback(pid, LoopbackModeExcludeTree);
                 }
                 else
@@ -156,11 +199,8 @@ internal sealed class AudioLoopback : IDisposable
                 }
 
                 capture = InitializeCapture(client, flags);
-                OpenExtras(extraDevices, mainDeviceId);
-                if (extras.Count > 0)
-                {
-                    Route += " + " + string.Join(" + ", extras.Select(e => e.Name));
-                }
+                mainHearsEveryDevice = vad;
+                Route += OpenExtras(extraDevices, mainDeviceId, excludedPid);
             }
 
             if (mic)
@@ -240,6 +280,11 @@ internal sealed class AudioLoopback : IDisposable
                     AppLog.Write($"extra audio device {extra.Name} would not start: 0x{hr:X8}");
                 }
             }
+
+            if (mainHearsEveryDevice && extras.Count > 0)
+            {
+                watcher = DefaultWatcher.TryStart(id => defaultChangedTo = id);
+            }
         }
         catch
         {
@@ -268,8 +313,14 @@ internal sealed class AudioLoopback : IDisposable
 
     /// <summary>One extra render endpoint, loopback-captured whole and mixed in through
     /// its own drift corrector. Pump thread only after construction.</summary>
-    private sealed class ExtraDevice(string name, IAudioClient client, IAudioCaptureClient capture)
+    private sealed class ExtraDevice(
+        string id, string name, IAudioClient client, IAudioCaptureClient capture, IReadOnlyCollection<string> covers)
     {
+        public string Id { get; } = id;
+
+        /// <summary>The output devices whose sound this stream carries.</summary>
+        public IReadOnlyCollection<string> Covers { get; } = covers;
+
         public string Name { get; } = name;
         public IAudioClient Client { get; } = client;
         public IAudioCaptureClient Capture { get; } = capture;
@@ -306,11 +357,57 @@ internal sealed class AudioLoopback : IDisposable
         }
     }
 
-    private void OpenExtras(IReadOnlyList<string> ids, string? mainDeviceId)
+    /// <summary>Which ticked devices a segment records, and how (#11).</summary>
+    /// <param name="Endpoints">Devices captured whole through their own loopback.</param>
+    /// <param name="HeardByMain">Ticked devices the main stream already hears in full.</param>
+    /// <param name="ExcludedApp">Add the excluded app's own audio back: it plays on ticked
+    /// devices only, where a whole capture of the device would have carried it.</param>
+    /// <param name="ExcludedAppCovers">The devices that excluded-app stream stands for.</param>
+    internal sealed record ExtraPlan(
+        List<string> Endpoints, List<string> HeardByMain, bool ExcludedApp, List<string> ExcludedAppCovers);
+
+    /// <summary>
+    /// The default device is always in the main stream, and the main stream's own device
+    /// is already heard: neither is mixed twice. On the exclude route the main stream is
+    /// process loopback minus the excluded app's tree, and process loopback hears EVERY
+    /// output device, not just the default one: a ticked device captured whole on top
+    /// would carry everything on it twice. There the one thing a ticked device adds is the
+    /// excluded app's own sound on it (Discord on Sonar Chat), and that is added back
+    /// only when the app plays on ticked, non-default devices alone, so Keep Discord out
+    /// still holds for the default device. <paramref name="excludedAppDevices"/> are the
+    /// devices hosting an audio session of the excluded tree.
+    /// </summary>
+    internal static ExtraPlan PlanExtras(
+        IReadOnlyList<string> ticked, string? defaultId, string? mainDeviceId, bool excludeRoute,
+        IReadOnlyCollection<string>? excludedAppDevices)
+    {
+        var cmp = StringComparer.OrdinalIgnoreCase;
+        var candidates = ticked.Where(id => !string.IsNullOrEmpty(id)).Distinct(cmp)
+            .Where(id => !cmp.Equals(id, defaultId) && !cmp.Equals(id, mainDeviceId)).ToList();
+        if (!excludeRoute)
+        {
+            return new ExtraPlan(candidates, [], false, []);
+        }
+
+        var appDevices = (excludedAppDevices ?? []).Distinct(cmp).ToList();
+        bool addBack = appDevices.Count > 0 && appDevices.All(d => candidates.Contains(d, cmp));
+        return new ExtraPlan([], candidates, addBack, addBack ? appDevices : []);
+    }
+
+    /// <summary>Whether an extra stream standing for <paramref name="covers"/> must fall
+    /// silent when <paramref name="newDefault"/> becomes the default playback device: on
+    /// routes that hear every device, the main stream now carries that device's sound
+    /// too (a game following the default moves there). An endpoint main stream stays on
+    /// the device it opened, so nothing is doubled there.</summary>
+    internal static bool MuteOnDefaultChange(IReadOnlyCollection<string> covers, string newDefault, bool mainHearsEveryDevice) =>
+        mainHearsEveryDevice && covers.Contains(newDefault, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Opens what <see cref="PlanExtras"/> decides; returns the route suffix.</summary>
+    private string OpenExtras(IReadOnlyList<string> ids, string? mainDeviceId, int excludedPid)
     {
         if (ids.Count == 0)
         {
-            return;
+            return "";
         }
 
         string? defaultId = DefaultRenderId();
@@ -322,21 +419,20 @@ internal sealed class AudioLoopback : IDisposable
         catch (Exception ex)
         {
             AppLog.Write("extra audio devices unavailable: " + ex.Message);
-            return;
+            return "";
         }
 
         try
         {
-            foreach (var id in ids.Distinct(StringComparer.OrdinalIgnoreCase))
+            var plan = PlanExtras(ids, defaultId, mainDeviceId, excludedPid > 0,
+                excludedPid > 0 ? SessionDevices(enumerator, ProcessTree(excludedPid)) : null);
+            if (excludedPid > 0)
             {
-                // The default device is always in the main stream (minus Discord), and
-                // the main stream's own device is already heard: never mix either twice.
-                if (string.Equals(id, defaultId, StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(id, mainDeviceId, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
+                return OpenExcludedApp(enumerator, plan, excludedPid);
+            }
 
+            foreach (var id in plan.Endpoints)
+            {
                 if (enumerator.GetDevice(id, out var device) < 0 || device is null)
                 {
                     ReportMissing(id, "unknown device");
@@ -346,7 +442,14 @@ internal sealed class AudioLoopback : IDisposable
                 IAudioClient? extraClient = null;
                 try
                 {
-                    if (device.GetState(out uint state) < 0 || state != 1 /* DEVICE_STATE_ACTIVE */)
+                    int stateHr = device.GetState(out uint state);
+#if DEBUG
+                    if (string.Equals(id, DebugUnpluggedExtra, StringComparison.OrdinalIgnoreCase))
+                    {
+                        state = 8; // DEVICE_STATE_UNPLUGGED
+                    }
+#endif
+                    if (stateHr < 0 || state != 1 /* DEVICE_STATE_ACTIVE */)
                     {
                         ReportMissing(id, "not connected");
                         continue;
@@ -362,7 +465,7 @@ internal sealed class AudioLoopback : IDisposable
                     extraClient = ActivateDevice(device, release: false);
                     var extraCapture = InitializeCapture(extraClient,
                         AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY);
-                    extras.Add(new ExtraDevice(name, extraClient, extraCapture));
+                    extras.Add(new ExtraDevice(id, name, extraClient, extraCapture, [id]));
                     extraClient = null;
                     ReportPresent(id, name);
                 }
@@ -380,6 +483,57 @@ internal sealed class AudioLoopback : IDisposable
         finally
         {
             Marshal.ReleaseComObject(enumerator);
+        }
+
+        return extras.Count == 0 ? "" : " + " + string.Join(" + ", extras.Select(e => e.Name));
+    }
+
+    /// <summary>The exclude route: ticked devices are already in the main stream; only
+    /// the excluded app's own audio may be added, as an include-tree capture.</summary>
+    private string OpenExcludedApp(IMMDeviceEnumerator enumerator, ExtraPlan plan, int pid)
+    {
+        string Names(IEnumerable<string> ids) => string.Join(", ", ids.Select(id => NameOf(enumerator, id)));
+        var suffix = plan.HeardByMain.Count == 0 ? "" : $" (already hears {Names(plan.HeardByMain)})";
+        if (!plan.ExcludedApp)
+        {
+            return suffix;
+        }
+
+        IAudioClient? appClient = null;
+        try
+        {
+            appClient = ActivateProcessLoopback(pid, LoopbackModeIncludeTree);
+            var appCapture = InitializeCapture(appClient, AUDCLNT_STREAMFLAGS_LOOPBACK);
+            string name = $"pid {pid}'s own audio on {Names(plan.ExcludedAppCovers)}";
+            extras.Add(new ExtraDevice($"pid {pid}", name, appClient, appCapture, plan.ExcludedAppCovers));
+            appClient = null;
+            return suffix + " + " + name;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Write($"excluded app's own audio unavailable (pid {pid}): {ex.Message}");
+            return suffix;
+        }
+        finally
+        {
+            ReleaseIfSet(appClient);
+        }
+    }
+
+    private static string NameOf(IMMDeviceEnumerator enumerator, string id)
+    {
+        if (enumerator.GetDevice(id, out var device) < 0 || device is null)
+        {
+            return id;
+        }
+
+        try
+        {
+            return FriendlyName(device) ?? id;
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(device);
         }
     }
 
@@ -432,6 +586,18 @@ internal sealed class AudioLoopback : IDisposable
             while (!stopping)
             {
                 Thread.Sleep(10);
+#if DEBUG
+                if (DebugDefaultChanged is { } simulated)
+                {
+                    DebugDefaultChanged = null;
+                    defaultChangedTo = simulated;
+                }
+#endif
+                if (defaultChangedTo is { } newDefault)
+                {
+                    defaultChangedTo = null;
+                    OnDefaultChanged(newDefault);
+                }
 
                 // Mic first, so the frames written next have its newest samples to mix.
                 if (micCapture is not null)
@@ -481,6 +647,20 @@ internal sealed class AudioLoopback : IDisposable
         }
     }
 
+    /// <summary>Pump thread: the default playback device changed mid-segment.</summary>
+    private void OnDefaultChanged(string newDefault)
+    {
+        foreach (var extra in extras)
+        {
+            if (!extra.Mixer.Muted && MuteOnDefaultChange(extra.Covers, newDefault, mainHearsEveryDevice))
+            {
+                extra.Mixer.Mute();
+                AppLog.Write($"extra audio device {extra.Name}: now the default device, already in the system mix; "
+                    + "left out until the next segment");
+            }
+        }
+    }
+
     private void Drain(IAudioCaptureClient source, bool mic)
     {
         while (true)
@@ -497,11 +677,16 @@ internal sealed class AudioLoopback : IDisposable
                 return;
             }
 
-            hr = source.GetBuffer(out var data, out uint frames, out uint flags, out _, out _);
+            hr = source.GetBuffer(out var data, out uint frames, out uint flags, out _, out long qpc);
             if (hr < 0)
             {
                 LogDeviceError("GetBuffer", hr, mic);
                 return;
+            }
+
+            if (!mic && qpc > 0 && (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) == 0)
+            {
+                mainNextTime = qpc / 1e7;
             }
 
             if (frames == 0)
@@ -544,11 +729,19 @@ internal sealed class AudioLoopback : IDisposable
                 return;
             }
 
+#if DEBUG
+            if (string.Equals(extra.Id, DebugInvalidateExtra, StringComparison.OrdinalIgnoreCase))
+            {
+                DebugInvalidateExtra = null;
+                hr = AUDCLNT_E_DEVICE_INVALIDATED;
+            }
+#endif
             IntPtr data = IntPtr.Zero;
             uint frames = 0, flags = 0;
+            long qpc = 0;
             if (hr >= 0)
             {
-                hr = extra.Capture.GetBuffer(out data, out frames, out flags, out _, out _);
+                hr = extra.Capture.GetBuffer(out data, out frames, out flags, out _, out qpc);
             }
 
             if (hr < 0)
@@ -565,13 +758,14 @@ internal sealed class AudioLoopback : IDisposable
                 return;
             }
 
+            double time = qpc > 0 && (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) == 0 ? qpc / 1e7 : double.NaN;
             if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0 || data == IntPtr.Zero)
             {
-                extra.Mixer.QueueSilence((int)frames);
+                extra.Mixer.QueueSilence((int)frames, time);
             }
             else
             {
-                extra.Mixer.Queue(new ReadOnlySpan<short>((void*)data, (int)frames * Channels));
+                extra.Mixer.Queue(new ReadOnlySpan<short>((void*)data, (int)frames * Channels), time);
             }
 
             extra.Capture.ReleaseBuffer(frames);
@@ -655,6 +849,13 @@ internal sealed class AudioLoopback : IDisposable
             return;
         }
 
+        // Synthesized silence carries on the main stream's timeline from its last packet.
+        double time = mainNextTime;
+        if (!double.IsNaN(mainNextTime))
+        {
+            mainNextTime += frames / (double)SampleRate;
+        }
+
         if (micRing is null && extras.Count == 0)
         {
             Emit(data, frames);
@@ -686,7 +887,7 @@ internal sealed class AudioLoopback : IDisposable
         // just runs dry into silence.
         foreach (var extra in extras)
         {
-            extra.Mixer.MixInto(mix);
+            extra.Mixer.MixInto(mix, time);
         }
 
         fixed (short* p = mix)
@@ -713,6 +914,7 @@ internal sealed class AudioLoopback : IDisposable
 
         finalized = true;
         stopping = true;
+        watcher?.Dispose();
         if (!pump.Join(2000))
         {
             // The pump is wedged inside a call to a dead device; finalizing or
@@ -736,6 +938,10 @@ internal sealed class AudioLoopback : IDisposable
             {
                 AppLog.Write($"extra audio device {extra.Name}: {extra.Mixer.DroppedFrames * 1000 / SampleRate} ms trimmed this segment");
             }
+#if DEBUG
+            AppLog.Write($"debug: extra audio device {extra.Name}: {extra.Mixer.Underruns} underruns, ratio {extra.Mixer.Ratio:F6}, "
+                + $"aligned {extra.Mixer.AlignedFrames} frames, timestamps {(double.IsNaN(mainNextTime) ? "none" : "main")}");
+#endif
 
             extra.Client.Stop();  // HRESULT only; a vanished device just reports an error
         }
@@ -1219,7 +1425,123 @@ internal sealed class AudioLoopback : IDisposable
         return id;
     }
 
-    private static bool HasSessionFor(IMMDevice device, int pid)
+    /// <summary>Active render devices hosting an audio session of any pid in
+    /// <paramref name="tree"/>.</summary>
+    private static List<string> SessionDevices(IMMDeviceEnumerator enumerator, HashSet<uint> tree)
+    {
+        var found = new List<string>();
+        try
+        {
+            if (enumerator.EnumAudioEndpoints(0 /* eRender */, 1 /* DEVICE_STATE_ACTIVE */, out var devices) < 0)
+            {
+                return found;
+            }
+
+            try
+            {
+                Mf.Check(devices.GetCount(out int count));
+                for (int i = 0; i < count; i++)
+                {
+                    if (devices.Item(i, out var device) < 0)
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        if (HasSessionFor(device, tree.Contains) && DeviceId(device) is { } id)
+                        {
+                            found.Add(id);
+                        }
+                    }
+                    finally
+                    {
+                        Marshal.ReleaseComObject(device);
+                    }
+                }
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(devices);
+            }
+        }
+        catch
+        {
+            // Best effort: no sessions found means the excluded app stays out.
+        }
+
+        return found;
+    }
+
+    /// <summary><paramref name="root"/> and every process descended from it.</summary>
+    private static HashSet<uint> ProcessTree(int root)
+    {
+        var tree = new HashSet<uint> { (uint)root };
+        IntPtr snap = CreateToolhelp32Snapshot(0x2 /* TH32CS_SNAPPROCESS */, 0);
+        if (snap == IntPtr.Zero || snap == new IntPtr(-1))
+        {
+            return tree;
+        }
+
+        try
+        {
+            var parents = new List<(uint Pid, uint Parent)>();
+            var entry = new PROCESSENTRY32W { dwSize = (uint)Marshal.SizeOf<PROCESSENTRY32W>() };
+            for (bool ok = Process32FirstW(snap, ref entry); ok; ok = Process32NextW(snap, ref entry))
+            {
+                parents.Add((entry.th32ProcessID, entry.th32ParentProcessID));
+            }
+
+            for (bool grew = true; grew;)
+            {
+                grew = false;
+                foreach (var (pid, parent) in parents)
+                {
+                    if (pid != 0 && tree.Contains(parent) && tree.Add(pid))
+                    {
+                        grew = true;
+                    }
+                }
+            }
+        }
+        finally
+        {
+            CloseHandle(snap);
+        }
+
+        return tree;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool Process32FirstW(IntPtr snapshot, ref PROCESSENTRY32W entry);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool Process32NextW(IntPtr snapshot, ref PROCESSENTRY32W entry);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct PROCESSENTRY32W
+    {
+        public uint dwSize;
+        public uint cntUsage;
+        public uint th32ProcessID;
+        public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID;
+        public uint cntThreads;
+        public uint th32ParentProcessID;
+        public int pcPriClassBase;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExeFile;
+    }
+
+    private static bool HasSessionFor(IMMDevice device, int pid) => HasSessionFor(device, owner => owner == (uint)pid);
+
+    private static bool HasSessionFor(IMMDevice device, Func<uint, bool> owns)
     {
         var mgrIid = IID_IAudioSessionManager2;
         if (device.Activate(ref mgrIid, 23 /* CLSCTX_ALL */, IntPtr.Zero, out var mgrPtr) < 0)
@@ -1249,7 +1571,7 @@ internal sealed class AudioLoopback : IDisposable
                     try
                     {
                         if (session is IAudioSessionControl2 details
-                            && details.GetProcessId(out uint owner) >= 0 && owner == (uint)pid)
+                            && details.GetProcessId(out uint owner) >= 0 && owns(owner))
                         {
                             return true;
                         }
@@ -1286,6 +1608,85 @@ internal sealed class AudioLoopback : IDisposable
         [FieldOffset(8)] public uint blobSize;
         [FieldOffset(8)] public IntPtr pointer;     // VT_LPWSTR and other pointer types
         [FieldOffset(16)] public IntPtr blobData;
+    }
+
+    /// <summary>Tells the owner when the default playback device changes. The callback
+    /// runs on a Windows audio thread: it only hands the ID over, never blocks.</summary>
+    private sealed class DefaultWatcher : IMMNotificationClient, IDisposable
+    {
+        private readonly Action<string> changed;
+        private IMMDeviceEnumerator? enumerator;
+
+        private DefaultWatcher(Action<string> changed) => this.changed = changed;
+
+        public static DefaultWatcher? TryStart(Action<string> changed)
+        {
+            var w = new DefaultWatcher(changed);
+            try
+            {
+                w.enumerator = CreateDeviceEnumerator();
+                if (w.enumerator.RegisterEndpointNotificationCallback(w) >= 0)
+                {
+                    return w;
+                }
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write("default device changes not watched: " + ex.Message);
+            }
+
+            w.Release();
+            return null;
+        }
+
+        public void Dispose()
+        {
+            if (enumerator is not null)
+            {
+                enumerator.UnregisterEndpointNotificationCallback(this);
+                Release();
+            }
+        }
+
+        private void Release()
+        {
+            if (enumerator is not null)
+            {
+                Marshal.ReleaseComObject(enumerator);
+                enumerator = null;
+            }
+        }
+
+        public int OnDefaultDeviceChanged(int flow, int role, string? id)
+        {
+            // eRender, eConsole: what Sound settings calls the default playback device.
+            if (flow == 0 && role == 0 && id is not null)
+            {
+                changed(id);
+            }
+
+            return 0;
+        }
+
+        public int OnDeviceStateChanged(string? id, uint state) => 0;
+
+        public int OnDeviceAdded(string? id) => 0;
+
+        public int OnDeviceRemoved(string? id) => 0;
+
+        public int OnPropertyValueChanged(string? id, PROPERTYKEY key) => 0;
+    }
+
+    [ComImport]
+    [Guid("7991EEC9-7E89-4D85-8390-6C703CEC60C0")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IMMNotificationClient
+    {
+        [PreserveSig] int OnDeviceStateChanged([MarshalAs(UnmanagedType.LPWStr)] string? id, uint state);
+        [PreserveSig] int OnDeviceAdded([MarshalAs(UnmanagedType.LPWStr)] string? id);
+        [PreserveSig] int OnDeviceRemoved([MarshalAs(UnmanagedType.LPWStr)] string? id);
+        [PreserveSig] int OnDefaultDeviceChanged(int flow, int role, [MarshalAs(UnmanagedType.LPWStr)] string? id);
+        [PreserveSig] int OnPropertyValueChanged([MarshalAs(UnmanagedType.LPWStr)] string? id, PROPERTYKEY key);
     }
 
     private sealed class ActivateHandler : IActivateAudioInterfaceCompletionHandler
@@ -1359,8 +1760,8 @@ internal sealed class AudioLoopback : IDisposable
         [PreserveSig] int EnumAudioEndpoints(int dataFlow, uint stateMask, out IMMDeviceCollection devices);
         [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice device);
         [PreserveSig] int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IMMDevice device);
-        [PreserveSig] int RegisterEndpointNotificationCallback(IntPtr client);
-        [PreserveSig] int UnregisterEndpointNotificationCallback(IntPtr client);
+        [PreserveSig] int RegisterEndpointNotificationCallback(IMMNotificationClient client);
+        [PreserveSig] int UnregisterEndpointNotificationCallback(IMMNotificationClient client);
     }
 
     [ComImport]

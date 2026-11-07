@@ -7,6 +7,13 @@ namespace DejaVu;
 /// buffer. Trimming or padding the backlog clicks; letting it grow drifts the voice off
 /// the picture. Instead the stream is resampled on the fly, and the resampling ratio is
 /// steered so the backlog holds at a small fixed cushion: no growing offset, no gaps.
+///
+/// The cushion is held in time, not in frames, when both streams carry capture
+/// timestamps (WASAPI's QPC position): the backlog counted in frames depends on where
+/// the two devices' 10 ms packets fall against each other, which differs every time a
+/// segment opens them, and moved the chat device 10-20 ms against the game from one
+/// minute to the next. Measured against the main stream's own timestamps, the extra
+/// sits the same 40 ms behind every time, from its first sample.
 /// Single-threaded: the audio pump owns it.
 /// </summary>
 internal sealed class DriftMixer
@@ -22,12 +29,27 @@ internal sealed class DriftMixer
     private const double MaxDeviation = 0.005;
     private const double SmoothingSeconds = 1.0;
 
+    // Starting and running dry happen mid-waveform: a 5 ms raised-cosine fade at each
+    // edge turns what would be a step (a click) into an inaudible ramp.
+    private const double FadeSeconds = 0.005;
+
+    // Timestamps further apart than this are not one clock domain (or are stale): the
+    // backlog is then judged by frame count alone.
+    private const double MaxStampGapSeconds = 0.25;
+
     private readonly int channels;
     private readonly int sampleRate;
     private readonly short[] ring;
     private readonly int capacityFrames;
     private readonly double gain;
     private readonly float[] previous;
+
+    private readonly int fadeFrames;
+    private int fadeInDone;  // output frames since priming, for the fade-in
+    private int muteDone;    // output frames since Mute, for the fade-out
+
+    // Capture time (seconds) just past the newest queued frame; NaN when unknown.
+    private double tailTime = double.NaN;
 
     private int head;   // frame index of x0, the frame the read position sits on
     private int count;  // frames buffered from head
@@ -44,6 +66,7 @@ internal sealed class DriftMixer
         previous = new float[channels];
         gain = MaxDeviation / TargetFrames;
         smoothed = TargetFrames;
+        fadeFrames = Math.Max(1, (int)(sampleRate * FadeSeconds));
     }
 
     public int TargetFrames { get; }
@@ -65,16 +88,33 @@ internal sealed class DriftMixer
     /// <summary>Frames thrown away because the backlog hit its ceiling.</summary>
     public long DroppedFrames { get; private set; }
 
-    public void Queue(ReadOnlySpan<short> interleaved) => Append(interleaved, interleaved.Length / channels);
+    /// <summary>Faded out and silent from now on (the source keeps being consumed).</summary>
+    public bool Muted { get; private set; }
 
-    public void QueueSilence(int frames) => Append(default, frames);
+    /// <summary>Frames skipped when priming, to start exactly one cushion behind.</summary>
+    public long AlignedFrames { get; private set; }
 
-    private void Append(ReadOnlySpan<short> source, int frames)
+    /// <summary>Queues a packet. <paramref name="time"/> is the capture time of its first
+    /// frame, in seconds on the same clock as the main stream's (QPC), or NaN.</summary>
+    public void Queue(ReadOnlySpan<short> interleaved, double time = double.NaN) =>
+        Append(interleaved, interleaved.Length / channels, time);
+
+    public void QueueSilence(int frames, double time = double.NaN) => Append(default, frames, time);
+
+    /// <summary>Fades this source out over 5 ms and keeps it silent: the device became
+    /// one the main stream already hears.</summary>
+    public void Mute() => Muted = true;
+
+    private void Append(ReadOnlySpan<short> source, int frames, double time)
     {
         if (frames <= 0)
         {
             return;
         }
+
+        tailTime = !double.IsNaN(time) ? time + frames / (double)sampleRate
+            : !double.IsNaN(tailTime) ? tailTime + frames / (double)sampleRate
+            : double.NaN;
 
         if (count + frames > capacityFrames)
         {
@@ -107,9 +147,24 @@ internal sealed class DriftMixer
         count += frames;
     }
 
+    /// <summary>The backlog as a delay, in frames: how long before the main stream's
+    /// <paramref name="time"/> the next source frame was captured. Without usable
+    /// timestamps, the frames queued.</summary>
+    private double Backlog(double time)
+    {
+        if (double.IsNaN(time) || double.IsNaN(tailTime) || Math.Abs(time - tailTime) > MaxStampGapSeconds)
+        {
+            return count;
+        }
+
+        return count + (time - tailTime) * sampleRate;
+    }
+
     /// <summary>Adds resampled source audio into <paramref name="mix"/> (interleaved,
-    /// saturating). Frames the source cannot cover are left as they are.</summary>
-    public void MixInto(Span<short> mix)
+    /// saturating). Frames the source cannot cover are left as they are.
+    /// <paramref name="time"/> is the capture time of the mix's first frame on the
+    /// clock <see cref="Queue"/> uses, or NaN.</summary>
+    public void MixInto(Span<short> mix, double time = double.NaN)
     {
         int frames = mix.Length / channels;
         if (frames == 0)
@@ -117,15 +172,28 @@ internal sealed class DriftMixer
             return;
         }
 
+        double backlog = Backlog(time);
         if (!Primed)
         {
-            if (count < TargetFrames)
+            if (count < TargetFrames || backlog < TargetFrames)
             {
                 return;
             }
 
+            // Start exactly one cushion behind the main stream: skip what is older.
+            int skip = (int)Math.Min(backlog - TargetFrames, count - TargetFrames);
+            if (skip > 0)
+            {
+                head = (head + skip) % capacityFrames;
+                count -= skip;
+                backlog -= skip;
+                AlignedFrames += skip;
+            }
+
             Primed = true;
             fraction = 0;
+            fadeInDone = 0;
+            smoothed = backlog;
             for (int c = 0; c < channels; c++)
             {
                 previous[c] = ring[head * channels + c];
@@ -135,17 +203,42 @@ internal sealed class DriftMixer
         // Steer from the backlog as it stands before this pull. Frozen while unprimed,
         // so a quiet spell does not leave the ratio slammed to one end on resume.
         double alpha = Math.Min(1.0, frames / (SmoothingSeconds * sampleRate));
-        smoothed += alpha * (count - smoothed);
+        smoothed += alpha * (backlog - smoothed);
         Ratio = 1 + Math.Clamp(gain * (smoothed - TargetFrames), -MaxDeviation, MaxDeviation);
+
+        // Output frames the backlog can cover in this pull: cubic interpolation needs
+        // x0..x2 ahead of the read position, so frame j needs
+        // count - floor(fraction + j * Ratio) >= 3. Short of the whole pull, the last of
+        // them fade out instead of stopping dead.
+        int covered = (int)Math.Max(0, Math.Ceiling((count - 2 - fraction) / Ratio));
+        int fadeOutFrom = covered < frames ? Math.Max(0, covered - fadeFrames) : int.MaxValue;
+        int fadeOutLength = covered - fadeOutFrom;
 
         for (int f = 0; f < frames; f++)
         {
-            // Cubic interpolation needs x0..x2 ahead of the read position.
             if (count < 3)
             {
                 Primed = false;
                 Underruns++;
                 return;
+            }
+
+            float edge = 1f;
+            if (fadeInDone < fadeFrames)
+            {
+                edge = 0.5f - 0.5f * MathF.Cos(MathF.PI * (fadeInDone + 1) / (fadeFrames + 1));
+                fadeInDone++;
+            }
+
+            if (f >= fadeOutFrom)
+            {
+                edge *= 0.5f + 0.5f * MathF.Cos(MathF.PI * (f - fadeOutFrom + 1) / (fadeOutLength + 1));
+            }
+
+            if (Muted)
+            {
+                edge *= muteDone >= fadeFrames ? 0f : 0.5f + 0.5f * MathF.Cos(MathF.PI * (muteDone + 1) / (fadeFrames + 1));
+                muteDone++;
             }
 
             int i0 = head * channels;
@@ -162,7 +255,7 @@ internal sealed class DriftMixer
                 float d = 0.5f * (x1 - xm1);
                 float y = ((a * t + b) * t + d) * t + x0;
 
-                int sum = mix[f * channels + c] + (int)MathF.Round(y);
+                int sum = mix[f * channels + c] + (int)MathF.Round(y * edge);
                 mix[f * channels + c] = (short)Math.Clamp(sum, short.MinValue, short.MaxValue);
             }
 

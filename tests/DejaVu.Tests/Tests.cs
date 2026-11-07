@@ -59,6 +59,18 @@ bool DesktopDeliversFrames()
     return frames > 0;
 }
 
+// Live multi-device audio checks on real endpoints (#11): see LiveModes.
+if (args.Length > 0 && LiveModes.Modes.Contains(args[0]))
+{
+    return LiveModes.Run(args);
+}
+
+// The tray's Audio devices submenu, read back by OCR and pixel checks (#11).
+if (args.Length > 0 && args[0] == "menushot")
+{
+    return MenuShotMode.Run(args);
+}
+
 // Soak recorder victim: buffers until killed from outside. Spawned by "soak", below.
 if (args.Length > 0 && args[0] == "soakrecord")
 {
@@ -562,6 +574,52 @@ Eq("oversized single clip survives alone",
 
 // Extra audio devices (#11): mixed in on their own clocks, drift-corrected.
 DriftTests.Run(Check);
+
+// The detectors the live multi-device checks judge real clips with, proven on synthetic
+// faults first.
+SignalAnalysisTests.Run((name, ok, detail) => Check(name, ok, detail));
+
+// Which extra devices a segment records, and how. Process loopback minus Discord hears
+// EVERY output device (measured: a marker on Sonar Chat, a headset or a monitor's
+// speakers all reach it at full level), so mixing a ticked device on top heard all of
+// it twice, 6-16 ms apart. On that route only the excluded app's own audio is missing,
+// and only when it plays on ticked devices alone may it be added back.
+{
+    const string Def = "{default}", Chat = "{chat}", Head = "{headset}", Main = "{main}";
+    var plain = AudioLoopback.PlanExtras([Chat, Head, Def, Chat.ToUpperInvariant()], Def, Def, excludeRoute: false, excludedAppDevices: null);
+    Eq("endpoint route: ticked devices are recorded, default and duplicates left out",
+        string.Join(",", plain.Endpoints), "{chat},{headset}");
+    Check("endpoint route: no excluded app stream", !plain.ExcludedApp);
+    var routed = AudioLoopback.PlanExtras([Chat, Main], Def, Main, excludeRoute: false, excludedAppDevices: null);
+    Eq("app routed to its own device: that device is not mixed twice", string.Join(",", routed.Endpoints), "{chat}");
+
+    var discordOnChat = AudioLoopback.PlanExtras([Chat], Def, Def, excludeRoute: true, excludedAppDevices: [Chat]);
+    Check("exclude route: no ticked device is captured whole", discordOnChat.Endpoints.Count == 0);
+    Eq("exclude route: ticked devices are already heard", string.Join(",", discordOnChat.HeardByMain), "{chat}");
+    Check("exclude route: Discord on the ticked chat device is added back", discordOnChat.ExcludedApp);
+    Eq("exclude route: the added stream stands for the chat device", string.Join(",", discordOnChat.ExcludedAppCovers), "{chat}");
+
+    var discordOnDefault = AudioLoopback.PlanExtras([Chat], Def, Def, excludeRoute: true, excludedAppDevices: [Chat, Def]);
+    Check("exclude route: Discord also on the default device stays out", !discordOnDefault.ExcludedApp && discordOnDefault.Endpoints.Count == 0);
+    var discordElsewhere = AudioLoopback.PlanExtras([Chat], Def, Def, excludeRoute: true, excludedAppDevices: [Head]);
+    Check("exclude route: Discord on an unticked device stays out", !discordElsewhere.ExcludedApp);
+    var discordSilent = AudioLoopback.PlanExtras([Chat], Def, Def, excludeRoute: true, excludedAppDevices: []);
+    Check("exclude route: Discord with no audio session stays out", !discordSilent.ExcludedApp);
+    var nothingTicked = AudioLoopback.PlanExtras([], Def, Def, excludeRoute: true, excludedAppDevices: [Chat]);
+    Check("exclude route: nothing ticked adds nothing", !nothingTicked.ExcludedApp && nothingTicked.Endpoints.Count == 0);
+    var tickedDefault = AudioLoopback.PlanExtras([Def], Def, Def, excludeRoute: true, excludedAppDevices: [Def]);
+    Check("exclude route: ticking the default device does not bring Discord back", !tickedDefault.ExcludedApp);
+
+    // The default device changes mid-segment to one an extra stream stands for.
+    Check("default moves to a ticked device the main stream hears: muted at once",
+        AudioLoopback.MuteOnDefaultChange([Chat], Chat, mainHearsEveryDevice: true));
+    Check("default moves to a ticked device, endpoint route: kept (the main stream stays on the old device)",
+        !AudioLoopback.MuteOnDefaultChange([Chat], Chat, mainHearsEveryDevice: false));
+    Check("default moves to some other device: kept",
+        !AudioLoopback.MuteOnDefaultChange([Chat], Head, mainHearsEveryDevice: true));
+    Check("device IDs compare case-insensitively",
+        AudioLoopback.MuteOnDefaultChange([Chat], Chat.ToUpperInvariant(), mainHearsEveryDevice: true));
+}
 
 // Extra audio devices in config.json: a new, optional key. A 1.4 config without it
 // loads with every setting intact and is NOT rewritten just to add it.

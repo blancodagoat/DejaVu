@@ -11,6 +11,15 @@ internal sealed class DarkMenuRenderer : ToolStripProfessionalRenderer
 
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
     {
+        if (e.Item is { Enabled: false })
+        {
+            // The base renderer greys disabled text with the system GrayText, 3.6:1 on
+            // this background: too faint for the Audio devices note line. The theme's
+            // dim tone still reads as greyed and clears 4.5:1.
+            TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont, e.TextRectangle, Theme.Dim, e.TextFormat);
+            return;
+        }
+
         e.TextColor = e.Item?.Selected == true ? Theme.Accent : Theme.Text;
         base.OnRenderItemText(e);
     }

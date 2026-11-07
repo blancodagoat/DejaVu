@@ -23,6 +23,11 @@
     <Compile Include="Tests.cs" />
     <Compile Include="DriftTests.cs" />
     <Compile Include="ToneRender.cs" />
+    <Compile Include="LiveAudio.cs" />
+    <Compile Include="SignalAnalysisTests.cs" />
+    <Compile Include="MixJudge.cs" />
+    <Compile Include="LiveModes.cs" />
+    <Compile Include="MenuShotMode.cs" />
     <!-- The production sources under test, compiled in directly rather than duplicated. -->
     <Compile Include="..\..\src\DejaVu\Native.cs" />
     <Compile Include="..\..\src\DejaVu\HotkeyBinding.cs" />

@@ -33,8 +33,17 @@ internal static class AppLog
         }
     }
 
+#if DEBUG
+    /// <summary>Debug builds only: each line as it is written, so the live tests can
+    /// check what was logged without reading the shared log file.</summary>
+    internal static event Action<string>? Written;
+#endif
+
     public static void Write(string message)
     {
+#if DEBUG
+        Written?.Invoke(message);
+#endif
         lock (Gate)
         {
             try

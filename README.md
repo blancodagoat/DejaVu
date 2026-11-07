@@ -160,6 +160,19 @@ dotnet run --project tests/DejaVu.Tests -- multiaudio Chat  # a -40 dBFS tone on
                                                    # must reach the mix only when that device is ticked
 ```
 
+Extra output devices have live checks of their own. They play -50 dBFS tones and markers on two outputs (SteelSeries Sonar Gaming and Chat when present) and judge the saved clip by measurement: clicks, pitch, echo, and the offset between the devices:
+
+```
+dotnet run --project tests/DejaVu.Tests -- mixlive        # both devices in a saved clip, per audio route
+dotnet run --project tests/DejaVu.Tests -- devicelost     # an extra device fails mid-segment and comes back (Debug hooks)
+dotnet run --project tests/DejaVu.Tests -- longmix 25     # 25 minutes: the offset between devices must not drift
+dotnet run --project tests/DejaVu.Tests -- defaultswitch  # switches the real default device mid-recording, then back
+dotnet run --project tests/DejaVu.Tests -- routeprobe     # which output devices each audio route hears
+dotnet run --project tests/DejaVu.Tests -- menushot       # the Audio devices submenu, by OCR and pixels (Debug app)
+```
+
+`defaultswitch` puts the original default device back when it finishes, and `restoredefault` undoes a run that was killed halfway. `menushot` runs the Debug app on a test config.json and restores yours byte for byte afterwards.
+
 The smoke test records the real screen and plays a test tone to prove exclusion strips it from the captured mix. It skips itself if the screen is locked or asleep, since a sleeping desktop delivers no frames.
 
 </details>

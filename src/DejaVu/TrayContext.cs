@@ -144,6 +144,22 @@ internal sealed class TrayContext : ApplicationContext
         pulse.Tick += (_, _) => SyncPauseUi();
         pulse.Start();
 
+#if DEBUG
+        // Debug builds only: DEJAVU_DEBUG_MENU_SHOT=<folder> opens the tray menu and its
+        // Audio devices submenu, saves them as PNGs plus a layout file, then exits. The
+        // menu-look test reads those ("menushot" in the test project).
+        if (Environment.GetEnvironmentVariable("DEJAVU_DEBUG_MENU_SHOT") is { Length: > 0 } shotDir)
+        {
+            var shot = new System.Windows.Forms.Timer { Interval = 3000 };
+            shot.Tick += (_, _) =>
+            {
+                shot.Stop();
+                MenuShot(shotDir);
+            };
+            shot.Start();
+        }
+#endif
+
         if (!hotkeyOk)
         {
             // Only the balloon said so before, and balloons are exactly what Focus Assist
@@ -711,6 +727,76 @@ internal sealed class TrayContext : ApplicationContext
         Balloon(title, text + " Click to report this on GitHub.", icon);
         pendingReport = title;
     }
+
+#if DEBUG
+    private void MenuShot(string dir)
+    {
+        Directory.CreateDirectory(dir);
+        var menu = tray.ContextMenuStrip!;
+        var area = Screen.PrimaryScreen!.WorkingArea;
+        menu.Show(new Point(area.Left + area.Width / 4, area.Top + area.Height / 8));
+        var audio = menu.Items.OfType<ToolStripMenuItem>().First(i => i.Text == "Audio devices");
+        audio.Select();
+        audio.ShowDropDown();
+
+        // Let both windows paint before reading the screen back.
+        var settle = Stopwatch.StartNew();
+        while (settle.ElapsedMilliseconds < 1500)
+        {
+            Application.DoEvents();
+            Thread.Sleep(20);
+        }
+
+        var layout = new List<string>
+        {
+            $"theme	background={Hex(Theme.Background)}	text={Hex(Theme.Text)}	accent={Hex(Theme.Accent)}"
+                + $"	dim={Hex(Theme.Dim)}	border={Hex(Theme.Border)}	hover={Hex(Theme.FieldHover)}",
+        };
+        foreach (var (name, strip) in new (string, ToolStrip)[] { ("menu", menu), ("audio", audio.DropDown) })
+        {
+            var b = strip.Bounds;
+            layout.Add($"strip	{name}	{b.X}	{b.Y}	{b.Width}	{b.Height}	{strip.Visible}");
+            for (int i = 0; i < strip.Items.Count; i++)
+            {
+                var item = strip.Items[i];
+                var r = item.Bounds;
+                var at = strip.PointToScreen(r.Location);
+                bool isChecked = item is ToolStripMenuItem { Checked: true };
+                layout.Add($"item	{name}	{i}	{(item is ToolStripSeparator ? "separator" : "item")}	{item.Text}"
+                    + $"	{at.X}	{at.Y}	{r.Width}	{r.Height}	{isChecked}	{item.Enabled}	{item.Selected}");
+            }
+
+            // Straight off the screen: what a user sees, shadow and all.
+            using (var bmp = new Bitmap(b.Width, b.Height))
+            {
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    g.CopyFromScreen(b.Location, Point.Empty, b.Size);
+                }
+
+                bmp.Save(Path.Combine(dir, $"{name}.png"), System.Drawing.Imaging.ImageFormat.Png);
+            }
+        }
+
+        var both = Rectangle.Union(menu.Bounds, audio.DropDown.Bounds);
+        using (var bmp = new Bitmap(both.Width, both.Height))
+        {
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.CopyFromScreen(both.Location, Point.Empty, both.Size);
+            }
+
+            bmp.Save(Path.Combine(dir, "both.png"), System.Drawing.Imaging.ImageFormat.Png);
+        }
+
+        File.WriteAllLines(Path.Combine(dir, "layout.tsv"), layout);
+        AppLog.Write("debug: menu shot saved to " + dir);
+        menu.Close();
+        ExitThread();
+
+        static string Hex(Color c) => $"#{c.R:x2}{c.G:x2}{c.B:x2}";
+    }
+#endif
 
     private void OnUi(Action action)
     {

@@ -169,6 +169,11 @@ internal static class Mp4Concat
 
             Mf.Check(writer.BeginWriting());
             long offset = 0;
+#if DEBUG
+            // Debug builds only: each segment's audio length, so the live audio checks
+            // know where the seams fall in the saved clip.
+            var audioLengths = new List<long>();
+#endif
 
             for (int r = 0; r < readers.Count; r++)
             {
@@ -202,6 +207,7 @@ internal static class Mp4Concat
                 }
 
                 long fileEnd = 0;
+                long audioLength = 0;
                 int ended = 0;
                 while (ended < streamMap.Count)
                 {
@@ -228,6 +234,10 @@ internal static class Mp4Concat
                         // Duration is optional on compressed samples; absent counts as zero.
                         long duration = sample.GetSampleDuration(out long d) == 0 ? d : 0;
                         fileEnd = Math.Max(fileEnd, time + duration);
+                        if (outIndex == audioOut)
+                        {
+                            audioLength += duration;
+                        }
 
                         Mf.Check(sample.SetSampleTime(time + offset));
                         Mf.Check(writer.WriteSample(outIndex, sample));
@@ -237,7 +247,15 @@ internal static class Mp4Concat
                 }
 
                 offset += fileEnd;
+#if DEBUG
+                audioLengths.Add(audioLength);
+#endif
             }
+
+#if DEBUG
+            AppLog.Write("debug: concat audio ms: " + string.Join(",",
+                audioLengths.Select(l => (l / 10_000.0).ToString("F1", System.Globalization.CultureInfo.InvariantCulture))));
+#endif
 
             Mf.Check(writer.Finalize_());
         }
