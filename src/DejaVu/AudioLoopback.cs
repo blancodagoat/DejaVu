@@ -170,6 +170,12 @@ internal sealed class AudioLoopback : IDisposable
                     }
                     else
                     {
+                        if (routed is { } onDefault)
+                        {
+                            // The default device isn't opened as an endpoint here: release it.
+                            Marshal.ReleaseComObject(onDefault.Device);
+                        }
+
                         Route = routed is null
                             ? $"app-only via process loopback (pid {pid}; no live session found yet)"
                             : $"app-only via process loopback (pid {pid})";
@@ -1113,6 +1119,7 @@ internal sealed class AudioLoopback : IDisposable
             // only with no playing session anywhere does an idle one decide, again
             // preferring the default.
             (IMMDevice Device, bool IsDefault)? playing = null, idle = null;
+            bool done = false;
             try
             {
                 Mf.Check(devices.GetCount(out int count));
@@ -1123,14 +1130,25 @@ internal sealed class AudioLoopback : IDisposable
                         continue;
                     }
 
-                    if (!HasSessionFor(device, pid))
+                    bool has, isDefault, active;
+                    try
+                    {
+                        has = HasSessionFor(device, pid);
+                        isDefault = has && DeviceId(device) == defaultId;
+                        active = has && HasSessionFor(device, owner => owner == (uint)pid, activeOnly: true);
+                    }
+                    catch
+                    {
+                        Marshal.ReleaseComObject(device);
+                        throw;
+                    }
+
+                    if (!has)
                     {
                         Marshal.ReleaseComObject(device);
                         continue;
                     }
 
-                    bool isDefault = DeviceId(device) == defaultId;
-                    bool active = HasSessionFor(device, owner => owner == (uint)pid, activeOnly: true);
                     ref var slot = ref active ? ref playing : ref idle;
                     if (slot is null || (isDefault && !slot.Value.IsDefault))
                     {
@@ -1146,10 +1164,18 @@ internal sealed class AudioLoopback : IDisposable
                         Marshal.ReleaseComObject(device);
                     }
                 }
+
+                done = true;
             }
             finally
             {
                 Marshal.ReleaseComObject(devices);
+                if (!done)
+                {
+                    // Failed partway: drop what the loop was holding before the catch below.
+                    if (playing is { } p) Marshal.ReleaseComObject(p.Device);
+                    if (idle is { } q) Marshal.ReleaseComObject(q.Device);
+                }
             }
 
             if (playing is { } chosen)
