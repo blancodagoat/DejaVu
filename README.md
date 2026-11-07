@@ -52,6 +52,7 @@ That's the entire app. There is no main window and nothing to set up; every sett
 | Capture method | Windows Graphics Capture, or Desktop Duplication. Windows 10 paints a yellow border around anything the first one records and gives no way to turn it off; the second draws no border, at the cost of recording whole displays only |
 | System audio | On or off |
 | Microphone | Off by default. On mixes your default mic into the clip's audio |
+| Audio devices | The default output is always recorded. Tick any other output (SteelSeries Sonar Chat, an Elgato Wave Link mix, a second headset) and it is recorded too, mixed into the same track. A ticked device is recorded whole: Keep Discord out applies to the default device only, which for a chat device is the point |
 | Captured app audio only | On by default. With a window captured, the clip carries that app's audio alone, even when a virtual mixer like SteelSeries Sonar routes the app to its own output device |
 | Keep Discord out of clips | Applies to monitor capture; one click puts voice chat back into the mix |
 | Save sound | A chime when a clip saves, a low buzz when a save fails. Off if you prefer silence |
@@ -97,7 +98,7 @@ That's the entire app. There is no main window and nothing to set up; every sett
 - Saving stitches the segments covering your window into one standard MP4. It's a lossless remux, no re-encode, done in a couple of seconds.
 - Segments on disk at launch mean the last session died, so they're stitched into `recovered_*.mp4` automatically and you get a balloon. A recovered clip that won't decode is thrown away rather than handed to you.
 - If a capture source delivers zero frames, the buffer drops it for the main display and says so. A sleeping or locked screen just idles until you're back. Repeated hard failures pause it for a minute at a time between retries, and it reports that too; it never stops silently.
-- Replay audio matches what you capture. A captured window records that app's audio: through the app's own output device when a virtual mixer (SteelSeries Sonar, per-app output settings) routes it there, through include-mode process loopback otherwise. Monitor capture records the system mix with the `audioExclude` process trees removed (Discord, Canary, PTB, and Vesktop by default). Either way it's encoded to AAC live, muxed per segment, with the default mic mixed in when Microphone is on, and the route each session took is written to the log.
+- Replay audio matches what you capture. A captured window records that app's audio: through the app's own output device when a virtual mixer (SteelSeries Sonar, per-app output settings) routes it there, through include-mode process loopback otherwise. Monitor capture records the system mix with the `audioExclude` process trees removed (Discord, Canary, PTB, and Vesktop by default). Output devices ticked under *Audio devices* are loopback-captured whole on top of that and mixed in; each runs on its own clock, so it is resampled on the fly and steered to the main stream's clock, which keeps a 25-minute buffer in sync without clicks. A ticked device that is unplugged, or vanishes mid-recording (a Sonar restart), costs only its own sound: the buffer keeps going and the device is picked up again at the next one-minute segment. Either way it's encoded to AAC live, muxed per segment, with the default mic mixed in when Microphone is on, and the route each session took is written to the log.
 - Everything the app does gets a line in `%APPDATA%\DejaVu\log.txt`, so a problem in the field leaves a trace instead of a vanished balloon.
 
 </details>
@@ -139,7 +140,7 @@ DejaVu is built for roughly 2015 machines and up:
 | `%APPDATA%\DejaVu\config.json` | all settings (missing keys fill themselves in; out-of-range values are clamped in memory without rewriting your file) |
 | `%LOCALAPPDATA%\DejaVu\buffer` | the rolling buffer |
 
-Config keys: `bufferMinutes` (5 to 25) · `quality` · `fps` · `saveHotkey` · `saveRoot` · `captureTarget` (`"auto"` or `\\.\DISPLAY2`) · `showIndicator` · `indicatorStyle` (`"dot"` or `"icon"`) · `systemAudio` · `microphone` · `appAudioOnly` · `clipCapGB` · `audioExclude` · `saveSound` · `updateNotify` · `captureBackend` (`"wgc"` or `"duplication"`)
+Config keys: `bufferMinutes` (5 to 25) · `quality` · `fps` · `saveHotkey` · `saveRoot` · `captureTarget` (`"auto"` or `\\.\DISPLAY2`) · `showIndicator` · `indicatorStyle` (`"dot"` or `"icon"`) · `systemAudio` · `microphone` · `appAudioOnly` · `clipCapGB` · `audioExclude` · `saveSound` · `updateNotify` · `captureBackend` (`"wgc"` or `"duplication"`) · `extraAudioDevices` (endpoint IDs of the ticked output devices; optional)
 
 </details>
 
@@ -155,6 +156,8 @@ dotnet run --project tests/DejaVu.Tests -- smoke   # + live capture / crash-reco
 dotnet run --project tests/DejaVu.Tests -- soak 12 # crash-kill soak: hard-kills a recording process at
                                                    # random moments, then proves every recovered clip
                                                    # decodes head to tail ("soak 500" = overnight run)
+dotnet run --project tests/DejaVu.Tests -- multiaudio Chat  # a -40 dBFS tone on a second output device
+                                                   # must reach the mix only when that device is ticked
 ```
 
 The smoke test records the real screen and plays a test tone to prove exclusion strips it from the captured mix. It skips itself if the screen is locked or asleep, since a sleeping desktop delivers no frames.

@@ -21,6 +21,8 @@
 
   <ItemGroup>
     <Compile Include="Tests.cs" />
+    <Compile Include="DriftTests.cs" />
+    <Compile Include="ToneRender.cs" />
     <!-- The production sources under test, compiled in directly rather than duplicated. -->
     <Compile Include="..\..\src\DejaVu\Native.cs" />
     <Compile Include="..\..\src\DejaVu\HotkeyBinding.cs" />
@@ -32,6 +34,7 @@
     <Compile Include="..\..\src\DejaVu\AppLog.cs" />
     <Compile Include="..\..\src\DejaVu\MfInterop.cs" />
     <Compile Include="..\..\src\DejaVu\AudioLoopback.cs" />
+    <Compile Include="..\..\src\DejaVu\DriftMixer.cs" />
     <Compile Include="..\..\src\DejaVu\Av1Gate.cs" />
     <Compile Include="..\..\src\DejaVu\CaptureEngine.cs" />
     <Compile Include="..\..\src\DejaVu\DesktopDuplication.cs" />

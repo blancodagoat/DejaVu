@@ -29,6 +29,7 @@ internal sealed class ConfigFile
     public bool? AppAudioOnly { get; set; }
     public bool? SaveSound { get; set; }
     public bool? UpdateNotify { get; set; }
+    public string[]? ExtraAudioDevices { get; set; }
 }
 
 [JsonSourceGenerationOptions(WriteIndented = true, PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
@@ -119,6 +120,15 @@ internal sealed class AppConfig
     public bool UpdateNotify { get; set; }
 
     /// <summary>
+    /// Endpoint IDs of render devices recorded on top of the default one (#11): virtual
+    /// mixers like SteelSeries Sonar or Elgato Wave Link put game and chat on separate
+    /// outputs. Each is captured whole and mixed in; IDs not plugged in right now are
+    /// skipped. Optional on disk: configs from before it existed are not rewritten
+    /// just to add it.
+    /// </summary>
+    public string[] ExtraAudioDevices { get; set; } = [];
+
+    /// <summary>
     /// Constant-quality target (1–100) for the encoder's quality rate-control mode.
     /// Unlike a fixed bitrate this spends bits on action and almost nothing on static
     /// frames, which is what clip recording wants.
@@ -136,101 +146,16 @@ internal sealed class AppConfig
     /// </summary>
     public static AppConfig Load()
     {
-        var config = new AppConfig();
+        AppConfig? config = null;
         bool rewrite = true;
+        bool firstRun = false;
 
         try
         {
-            config.FirstRun = !File.Exists(AppInfo.ConfigPath);
-            if (!config.FirstRun)
+            firstRun = !File.Exists(AppInfo.ConfigPath);
+            if (!firstRun)
             {
-                var json = File.ReadAllText(AppInfo.ConfigPath);
-                var file = JsonSerializer.Deserialize(json, ConfigJsonContext.Default.ConfigFile);
-                if (file is not null)
-                {
-                    // Rewrite ONLY to fill in missing keys. An out-of-range value is
-                    // clamped in memory but stays on disk untouched: the old
-                    // validate-then-rewrite turned every transient environment
-                    // difference (144 fps validated against a dock that wasn't
-                    // connected at logon) into permanent, silent settings loss.
-                    rewrite = false;
-
-                    if (file.BufferMinutes is int minutes)
-                    {
-                        config.BufferMinutes = Math.Clamp(minutes, 1, 60);
-                    }
-                    else
-                    {
-                        rewrite = true;
-                    }
-
-                    if (Enum.TryParse(file.Quality, ignoreCase: true, out Quality quality))
-                    {
-                        config.Quality = quality;
-                    }
-                    else
-                    {
-                        rewrite |= file.Quality is null;
-                    }
-
-                    if (file.Fps is int fps)
-                    {
-                        // Not validated against FpsChoices: those depend on the displays
-                        // attached right now, and a monitor asleep at logon must not
-                        // cost the user their setting.
-                        config.Fps = Math.Clamp(fps, 15, 360);
-                    }
-                    else
-                    {
-                        rewrite = true;
-                    }
-
-                    if (HotkeyBinding.TryParse(file.SaveHotkey, out var hotkey))
-                    {
-                        config.SaveHotkey = hotkey;
-                    }
-                    else
-                    {
-                        rewrite |= file.SaveHotkey is null;
-                    }
-
-                    if (!string.IsNullOrWhiteSpace(file.SaveRoot))
-                    {
-                        // Users hand-edit this: expand %VARS%, and refuse relative paths
-                        // — they resolve against System32 under autostart.
-                        var root = Environment.ExpandEnvironmentVariables(file.SaveRoot);
-                        if (Path.IsPathFullyQualified(root))
-                        {
-                            config.SaveRoot = root;
-                        }
-                    }
-                    else
-                    {
-                        rewrite |= file.SaveRoot is null;
-                    }
-
-                    config.ShowIndicator = file.ShowIndicator ?? true;
-                    config.IndicatorStyle = file.IndicatorStyle is "dot" or "icon" ? file.IndicatorStyle : "dot";
-                    config.SystemAudio = file.SystemAudio ?? true;
-                    config.Microphone = file.Microphone ?? false;
-                    config.ClipCapGB = Math.Max(0, file.ClipCapGB ?? 0);
-                    config.CaptureTarget = string.IsNullOrWhiteSpace(file.CaptureTarget)
-                        ? "auto" : file.CaptureTarget;
-                    config.CaptureBackend = file.CaptureBackend == "duplication" ? "duplication" : "wgc";
-                    if (file.AudioExclude is not null)
-                    {
-                        config.AudioExclude = file.AudioExclude;
-                    }
-
-                    config.AppAudioOnly = file.AppAudioOnly ?? true;
-                    config.SaveSound = file.SaveSound ?? true;
-                    config.UpdateNotify = file.UpdateNotify ?? false;
-
-                    rewrite |= file.ShowIndicator is null || file.IndicatorStyle is null || file.SystemAudio is null
-                        || file.ClipCapGB is null || file.CaptureTarget is null || file.CaptureBackend is null
-                        || file.AudioExclude is null || file.AppAudioOnly is null || file.SaveSound is null
-                        || file.UpdateNotify is null || file.Microphone is null;
-                }
+                config = Parse(File.ReadAllText(AppInfo.ConfigPath), out rewrite);
             }
         }
         catch
@@ -238,10 +163,136 @@ internal sealed class AppConfig
             // Defaults it is.
         }
 
+        if (config is null)
+        {
+            config = new AppConfig();
+            rewrite = true;
+        }
+
+        config.FirstRun = firstRun;
         if (rewrite)
         {
             config.Save();
         }
+
+        return config;
+    }
+
+    /// <summary>
+    /// The settings in <paramref name="json"/>, or null when it is not a config at all.
+    /// <paramref name="rewrite"/> says whether keys are missing and the file should be
+    /// written back to fill them in.
+    /// </summary>
+    internal static AppConfig? Parse(string json, out bool rewrite)
+    {
+        rewrite = true;
+        ConfigFile? file;
+        try
+        {
+            file = JsonSerializer.Deserialize(json, ConfigJsonContext.Default.ConfigFile);
+        }
+        catch
+        {
+            return null;
+        }
+
+        if (file is null)
+        {
+            return null;
+        }
+
+        var config = new AppConfig();
+
+        // Rewrite ONLY to fill in missing keys. An out-of-range value is
+        // clamped in memory but stays on disk untouched: the old
+        // validate-then-rewrite turned every transient environment
+        // difference (144 fps validated against a dock that wasn't
+        // connected at logon) into permanent, silent settings loss.
+        rewrite = false;
+
+        if (file.BufferMinutes is int minutes)
+        {
+            config.BufferMinutes = Math.Clamp(minutes, 1, 60);
+        }
+        else
+        {
+            rewrite = true;
+        }
+
+        if (Enum.TryParse(file.Quality, ignoreCase: true, out Quality quality))
+        {
+            config.Quality = quality;
+        }
+        else
+        {
+            rewrite |= file.Quality is null;
+        }
+
+        if (file.Fps is int fps)
+        {
+            // Not validated against FpsChoices: those depend on the displays
+            // attached right now, and a monitor asleep at logon must not
+            // cost the user their setting.
+            config.Fps = Math.Clamp(fps, 15, 360);
+        }
+        else
+        {
+            rewrite = true;
+        }
+
+        if (HotkeyBinding.TryParse(file.SaveHotkey, out var hotkey))
+        {
+            config.SaveHotkey = hotkey;
+        }
+        else
+        {
+            rewrite |= file.SaveHotkey is null;
+        }
+
+        if (!string.IsNullOrWhiteSpace(file.SaveRoot))
+        {
+            // Users hand-edit this: expand %VARS%, and refuse relative paths
+            // — they resolve against System32 under autostart.
+            var root = Environment.ExpandEnvironmentVariables(file.SaveRoot);
+            if (Path.IsPathFullyQualified(root))
+            {
+                config.SaveRoot = root;
+            }
+        }
+        else
+        {
+            rewrite |= file.SaveRoot is null;
+        }
+
+        config.ShowIndicator = file.ShowIndicator ?? true;
+        config.IndicatorStyle = file.IndicatorStyle is "dot" or "icon" ? file.IndicatorStyle : "dot";
+        config.SystemAudio = file.SystemAudio ?? true;
+        config.Microphone = file.Microphone ?? false;
+        config.ClipCapGB = Math.Max(0, file.ClipCapGB ?? 0);
+        config.CaptureTarget = string.IsNullOrWhiteSpace(file.CaptureTarget)
+            ? "auto" : file.CaptureTarget;
+        config.CaptureBackend = file.CaptureBackend == "duplication" ? "duplication" : "wgc";
+        if (file.AudioExclude is not null)
+        {
+            config.AudioExclude = file.AudioExclude;
+        }
+
+        config.AppAudioOnly = file.AppAudioOnly ?? true;
+        config.SaveSound = file.SaveSound ?? true;
+        config.UpdateNotify = file.UpdateNotify ?? false;
+
+        // Hand-edited lists get blanks and repeats; endpoint IDs compare
+        // case-insensitively. A missing key is no reason to rewrite: it is optional,
+        // and a 1.4 config must load exactly as it is.
+        config.ExtraAudioDevices = (file.ExtraAudioDevices ?? [])
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        rewrite |= file.ShowIndicator is null || file.IndicatorStyle is null || file.SystemAudio is null
+            || file.ClipCapGB is null || file.CaptureTarget is null || file.CaptureBackend is null
+            || file.AudioExclude is null || file.AppAudioOnly is null || file.SaveSound is null
+            || file.UpdateNotify is null || file.Microphone is null;
 
         return config;
     }
@@ -251,35 +302,42 @@ internal sealed class AppConfig
         try
         {
             Directory.CreateDirectory(AppInfo.DataDirectory);
-            var file = new ConfigFile
-            {
-                BufferMinutes = BufferMinutes,
-                Quality = Quality.ToString(),
-                Fps = Fps,
-                SaveHotkey = SaveHotkey.ToString(),
-                SaveRoot = SaveRoot,
-                ShowIndicator = ShowIndicator,
-                IndicatorStyle = IndicatorStyle,
-                SystemAudio = SystemAudio,
-                Microphone = Microphone,
-                ClipCapGB = ClipCapGB,
-                CaptureTarget = CaptureTarget,
-                CaptureBackend = CaptureBackend,
-                AudioExclude = AudioExclude,
-                AppAudioOnly = AppAudioOnly,
-                SaveSound = SaveSound,
-                UpdateNotify = UpdateNotify,
-            };
 
             // Write-then-rename: a power cut mid-write used to truncate the file, and a
             // truncated config resets every setting on the next launch.
             var temp = AppInfo.ConfigPath + ".tmp";
-            File.WriteAllText(temp, JsonSerializer.Serialize(file, ConfigJsonContext.Default.ConfigFile));
+            File.WriteAllText(temp, ToJson());
             File.Move(temp, AppInfo.ConfigPath, overwrite: true);
         }
         catch
         {
             // A failed save costs the user their settings on next launch, nothing worse.
         }
+    }
+
+    internal string ToJson()
+    {
+        var file = new ConfigFile
+        {
+            BufferMinutes = BufferMinutes,
+            Quality = Quality.ToString(),
+            Fps = Fps,
+            SaveHotkey = SaveHotkey.ToString(),
+            SaveRoot = SaveRoot,
+            ShowIndicator = ShowIndicator,
+            IndicatorStyle = IndicatorStyle,
+            SystemAudio = SystemAudio,
+            Microphone = Microphone,
+            ClipCapGB = ClipCapGB,
+            CaptureTarget = CaptureTarget,
+            CaptureBackend = CaptureBackend,
+            AudioExclude = AudioExclude,
+            AppAudioOnly = AppAudioOnly,
+            SaveSound = SaveSound,
+            UpdateNotify = UpdateNotify,
+            ExtraAudioDevices = ExtraAudioDevices,
+        };
+
+        return JsonSerializer.Serialize(file, ConfigJsonContext.Default.ConfigFile);
     }
 }

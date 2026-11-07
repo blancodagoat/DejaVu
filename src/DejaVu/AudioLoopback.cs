@@ -12,7 +12,8 @@ namespace DejaVu;
 /// PCM is encoded to AAC on the fly through a Media Foundation sink writer, one file per
 /// buffer segment; silence is synthesized whenever the system renders nothing, because
 /// loopback delivers no packets then and the AAC timeline must stay continuous.
-/// The default microphone, when opted in, is mixed into that same stream.
+/// The default microphone, when opted in, is mixed into that same stream, and so is any
+/// extra output device ticked in the tray, each drift-corrected to this stream's clock.
 /// </summary>
 internal sealed class AudioLoopback : IDisposable
 {
@@ -50,6 +51,9 @@ internal sealed class AudioLoopback : IDisposable
     private bool deviceErrorLogged;
     private bool micErrorLogged;
 
+    // Extra render devices recorded whole and mixed in (#11), each on its own clock.
+    private readonly List<ExtraDevice> extras = [];
+
     // Interleaved mic samples not yet mixed. Pump thread only, like the writer.
     private readonly short[]? micRing;
     private int micHead;
@@ -60,13 +64,16 @@ internal sealed class AudioLoopback : IDisposable
     /// <summary>Null when audio capture is unavailable; the caller records silent video.
     /// With <paramref name="includeOnly"/> the pid's tree is the whole mix instead of the
     /// one part left out — "captured app audio only". <paramref name="system"/> off with
-    /// <paramref name="mic"/> on records the microphone alone.</summary>
+    /// <paramref name="mic"/> on records the microphone alone. <paramref name="extraDevices"/>
+    /// are render endpoint IDs recorded whole on top of the system audio; any that are
+    /// not plugged in are skipped.</summary>
     public static AudioLoopback? TryStart(
-        string outputPath, int pid, bool includeOnly = false, bool system = true, bool mic = false)
+        string outputPath, int pid, bool includeOnly = false, bool system = true, bool mic = false,
+        IReadOnlyList<string>? extraDevices = null)
     {
         try
         {
-            return new AudioLoopback(outputPath, pid, includeOnly, system, mic);
+            return new AudioLoopback(outputPath, pid, includeOnly, system, mic, extraDevices ?? []);
         }
         catch (Exception ex)
         {
@@ -81,7 +88,13 @@ internal sealed class AudioLoopback : IDisposable
     /// unreadable without knowing which path a session used.</summary>
     public string Route { get; }
 
-    private AudioLoopback(string outputPath, int pid, bool includeOnly, bool system, bool mic)
+    /// <summary>Extra devices actually opened, with each drift corrector's state. For
+    /// diagnostics and the live test; read while the pump runs, so values are a snapshot.</summary>
+    internal IReadOnlyList<(string Name, double Ratio, int Backlog, long Dropped, long Underruns, bool Dead)> ExtraStats =>
+        extras.Select(e => (e.Name, e.Mixer.Ratio, e.Mixer.BufferedFrames, e.Mixer.DroppedFrames, e.Mixer.Underruns, e.Dead)).ToList();
+
+    private AudioLoopback(
+        string outputPath, int pid, bool includeOnly, bool system, bool mic, IReadOnlyList<string> extraDevices)
     {
         Mf.EnsureStarted();
 
@@ -93,6 +106,9 @@ internal sealed class AudioLoopback : IDisposable
         {
             if (system)
             {
+                // The endpoint the main stream hears, so an extra device that is the
+                // same one is not mixed in twice.
+                string? mainDeviceId = DefaultRenderId();
                 bool vad = false;
                 if (pid > 0 && includeOnly)
                 {
@@ -107,6 +123,7 @@ internal sealed class AudioLoopback : IDisposable
                     if (routed is { IsDefault: false } home)
                     {
                         Route = $"app-only via the app's output device (pid {pid})";
+                        mainDeviceId = DeviceId(home.Device);
                         client = ActivateDevice(home.Device);
                     }
                     else
@@ -139,6 +156,11 @@ internal sealed class AudioLoopback : IDisposable
                 }
 
                 capture = InitializeCapture(client, flags);
+                OpenExtras(extraDevices, mainDeviceId);
+                if (extras.Count > 0)
+                {
+                    Route += " + " + string.Join(" + ", extras.Select(e => e.Name));
+                }
             }
 
             if (mic)
@@ -207,12 +229,24 @@ internal sealed class AudioLoopback : IDisposable
             {
                 Mf.Check(micClient.Start());
             }
+
+            foreach (var extra in extras)
+            {
+                int hr = extra.Client.Start();
+                if (hr < 0)
+                {
+                    // An extra never costs the clip its main audio.
+                    extra.Dead = true;
+                    AppLog.Write($"extra audio device {extra.Name} would not start: 0x{hr:X8}");
+                }
+            }
         }
         catch
         {
             ReleaseIfSet(writer);
             ReleaseIfSet(micCapture);
             ReleaseIfSet(micClient);
+            ReleaseExtras();
             ReleaseIfSet(capture);
             ReleaseIfSet(client);
             throw;
@@ -230,6 +264,134 @@ internal sealed class AudioLoopback : IDisposable
         {
             Marshal.ReleaseComObject(com);
         }
+    }
+
+    /// <summary>One extra render endpoint, loopback-captured whole and mixed in through
+    /// its own drift corrector. Pump thread only after construction.</summary>
+    private sealed class ExtraDevice(string name, IAudioClient client, IAudioCaptureClient capture)
+    {
+        public string Name { get; } = name;
+        public IAudioClient Client { get; } = client;
+        public IAudioCaptureClient Capture { get; } = capture;
+        public DriftMixer Mixer { get; } = new(Channels, SampleRate);
+
+        /// <summary>Unplugged or restarted mid-segment: its calls only fail from here on,
+        /// and the next segment looks for it afresh.</summary>
+        public bool Dead { get; set; }
+    }
+
+    // Extra device IDs already reported as missing, so a ticked device that stays
+    // unplugged costs one log line, not one per one-minute segment.
+    private static readonly HashSet<string> reportedMissing = new(StringComparer.OrdinalIgnoreCase);
+
+    private static void ReportMissing(string id, string why)
+    {
+        lock (reportedMissing)
+        {
+            if (reportedMissing.Add(id))
+            {
+                AppLog.Write($"extra audio device skipped ({why}): {id}");
+            }
+        }
+    }
+
+    private static void ReportPresent(string id, string name)
+    {
+        lock (reportedMissing)
+        {
+            if (reportedMissing.Remove(id))
+            {
+                AppLog.Write($"extra audio device back: {name}");
+            }
+        }
+    }
+
+    private void OpenExtras(IReadOnlyList<string> ids, string? mainDeviceId)
+    {
+        if (ids.Count == 0)
+        {
+            return;
+        }
+
+        string? defaultId = DefaultRenderId();
+        IMMDeviceEnumerator enumerator;
+        try
+        {
+            enumerator = CreateDeviceEnumerator();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Write("extra audio devices unavailable: " + ex.Message);
+            return;
+        }
+
+        try
+        {
+            foreach (var id in ids.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                // The default device is always in the main stream (minus Discord), and
+                // the main stream's own device is already heard: never mix either twice.
+                if (string.Equals(id, defaultId, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(id, mainDeviceId, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (enumerator.GetDevice(id, out var device) < 0 || device is null)
+                {
+                    ReportMissing(id, "unknown device");
+                    continue;
+                }
+
+                IAudioClient? extraClient = null;
+                try
+                {
+                    if (device.GetState(out uint state) < 0 || state != 1 /* DEVICE_STATE_ACTIVE */)
+                    {
+                        ReportMissing(id, "not connected");
+                        continue;
+                    }
+
+                    if (!IsRender(device))
+                    {
+                        ReportMissing(id, "not an output device");
+                        continue;
+                    }
+
+                    string name = FriendlyName(device) ?? id;
+                    extraClient = ActivateDevice(device, release: false);
+                    var extraCapture = InitializeCapture(extraClient,
+                        AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY);
+                    extras.Add(new ExtraDevice(name, extraClient, extraCapture));
+                    extraClient = null;
+                    ReportPresent(id, name);
+                }
+                catch (Exception ex)
+                {
+                    ReportMissing(id, ex.Message);
+                }
+                finally
+                {
+                    ReleaseIfSet(extraClient);
+                    Marshal.ReleaseComObject(device);
+                }
+            }
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(enumerator);
+        }
+    }
+
+    private void ReleaseExtras()
+    {
+        foreach (var extra in extras)
+        {
+            ReleaseIfSet(extra.Capture);
+            ReleaseIfSet(extra.Client);
+        }
+
+        extras.Clear();
     }
 
     /// <summary>Initializes <paramref name="client"/> for our fixed PCM format and
@@ -275,6 +437,12 @@ internal sealed class AudioLoopback : IDisposable
                 if (micCapture is not null)
                 {
                     Drain(micCapture, mic: true);
+                }
+
+                // Extras likewise queue ahead of the main stream that pulls them.
+                foreach (var extra in extras)
+                {
+                    DrainExtra(extra);
                 }
 
                 if (capture is not null)
@@ -358,6 +526,58 @@ internal sealed class AudioLoopback : IDisposable
         }
     }
 
+    /// <summary>Queues an extra device's packets into its drift corrector. A failing
+    /// device (unplugged, Sonar restarting) is dropped for the rest of this segment —
+    /// the main stream and the buffer carry on — and the next segment retries it.</summary>
+    private unsafe void DrainExtra(ExtraDevice extra)
+    {
+        if (extra.Dead)
+        {
+            return;
+        }
+
+        while (true)
+        {
+            int hr = extra.Capture.GetNextPacketSize(out uint packet);
+            if (hr >= 0 && packet == 0)
+            {
+                return;
+            }
+
+            IntPtr data = IntPtr.Zero;
+            uint frames = 0, flags = 0;
+            if (hr >= 0)
+            {
+                hr = extra.Capture.GetBuffer(out data, out frames, out flags, out _, out _);
+            }
+
+            if (hr < 0)
+            {
+                extra.Dead = true;
+                AppLog.Write($"extra audio device lost: {extra.Name} (0x{hr:X8}); recording carries on without it");
+                return;
+            }
+
+            if (frames == 0)
+            {
+                // Phantom packet: see Drain.
+                extra.Capture.ReleaseBuffer(0);
+                return;
+            }
+
+            if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0 || data == IntPtr.Zero)
+            {
+                extra.Mixer.QueueSilence((int)frames);
+            }
+            else
+            {
+                extra.Mixer.Queue(new ReadOnlySpan<short>((void*)data, (int)frames * Channels));
+            }
+
+            extra.Capture.ReleaseBuffer(frames);
+        }
+    }
+
     /// <summary>Once per instance: a dead device (unplugged, default switched, driver
     /// restart) fails every call until the next segment builds a fresh capture, and the
     /// old behavior — synthesize silence, say nothing — was undiagnosable in the field.</summary>
@@ -435,7 +655,7 @@ internal sealed class AudioLoopback : IDisposable
             return;
         }
 
-        if (micRing is null)
+        if (micRing is null && extras.Count == 0)
         {
             Emit(data, frames);
             return;
@@ -457,7 +677,18 @@ internal sealed class AudioLoopback : IDisposable
             new ReadOnlySpan<short>((void*)data, samples).CopyTo(mix);
         }
 
-        MixMic(mix);
+        if (micRing is not null)
+        {
+            MixMic(mix);
+        }
+
+        // A dead extra is still drained of what it buffered before it went: its mixer
+        // just runs dry into silence.
+        foreach (var extra in extras)
+        {
+            extra.Mixer.MixInto(mix);
+        }
+
         fixed (short* p = mix)
         {
             Emit((IntPtr)p, frames);
@@ -498,6 +729,17 @@ internal sealed class AudioLoopback : IDisposable
             AppLog.Write($"audio was {synthesizedFrames * 100 / writtenFrames}% synthesized silence this segment");
         }
 
+        foreach (var extra in extras)
+        {
+            // Trimming only happens when the main stream stalled; worth a line when it does.
+            if (extra.Mixer.DroppedFrames > 0)
+            {
+                AppLog.Write($"extra audio device {extra.Name}: {extra.Mixer.DroppedFrames * 1000 / SampleRate} ms trimmed this segment");
+            }
+
+            extra.Client.Stop();  // HRESULT only; a vanished device just reports an error
+        }
+
         try
         {
             client?.Stop();
@@ -522,6 +764,7 @@ internal sealed class AudioLoopback : IDisposable
         {
             ReleaseIfSet(micCapture);
             ReleaseIfSet(micClient);
+            ReleaseExtras();
             ReleaseIfSet(capture);
             ReleaseIfSet(client);
             Marshal.ReleaseComObject(writer);
@@ -789,6 +1032,181 @@ internal sealed class AudioLoopback : IDisposable
         return string.Join(Environment.NewLine, lines);
     }
 
+    /// <summary>An active output device, for the tray's "Audio devices" checklist.</summary>
+    internal readonly record struct RenderDevice(string Id, string Name, bool IsDefault);
+
+    /// <summary>Every active render endpoint by friendly name, the default first. Empty
+    /// when the audio service cannot be reached.</summary>
+    internal static List<RenderDevice> ListRenderDevices()
+    {
+        var list = new List<RenderDevice>();
+        try
+        {
+            var enumerator = CreateDeviceEnumerator();
+            try
+            {
+                string? defaultId = null;
+                if (enumerator.GetDefaultAudioEndpoint(0, 0, out var def) >= 0)
+                {
+                    defaultId = DeviceId(def);
+                    Marshal.ReleaseComObject(def);
+                }
+
+                if (enumerator.EnumAudioEndpoints(0 /* eRender */, 1 /* DEVICE_STATE_ACTIVE */, out var devices) < 0)
+                {
+                    return list;
+                }
+
+                try
+                {
+                    Mf.Check(devices.GetCount(out int count));
+                    for (int i = 0; i < count; i++)
+                    {
+                        if (devices.Item(i, out var device) < 0)
+                        {
+                            continue;
+                        }
+
+                        try
+                        {
+                            if (DeviceId(device) is { } id)
+                            {
+                                list.Add(new RenderDevice(id, FriendlyName(device) ?? id, id == defaultId));
+                            }
+                        }
+                        finally
+                        {
+                            Marshal.ReleaseComObject(device);
+                        }
+                    }
+                }
+                finally
+                {
+                    Marshal.ReleaseComObject(devices);
+                }
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(enumerator);
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Write("audio device list unavailable: " + ex.Message);
+        }
+
+        return list
+            .OrderByDescending(d => d.IsDefault)
+            .ThenBy(d => d.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static string? DefaultRenderId()
+    {
+        try
+        {
+            var enumerator = CreateDeviceEnumerator();
+            try
+            {
+                if (enumerator.GetDefaultAudioEndpoint(0 /* eRender */, 0 /* eConsole */, out var def) < 0)
+                {
+                    return null;
+                }
+
+                try
+                {
+                    return DeviceId(def);
+                }
+                finally
+                {
+                    Marshal.ReleaseComObject(def);
+                }
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(enumerator);
+            }
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool IsRender(IMMDevice device) =>
+        device is IMMEndpoint endpoint && endpoint.GetDataFlow(out int flow) >= 0 && flow == 0 /* eRender */;
+
+    // PKEY_Device_FriendlyName: "Speakers (Realtek(R) Audio)", what Sound settings shows.
+    private static readonly PROPERTYKEY PKEY_Device_FriendlyName =
+        new() { fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), pid = 14 };
+
+    private const ushort VT_LPWSTR = 31;
+
+    private static string? FriendlyName(IMMDevice device)
+    {
+        if (device.OpenPropertyStore(0 /* STGM_READ */, out var storePtr) < 0 || storePtr == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        var store = (IPropertyStore)Marshal.GetObjectForIUnknown(storePtr);
+        Marshal.Release(storePtr);
+        try
+        {
+            var key = PKEY_Device_FriendlyName;
+            var value = default(PROPVARIANT);
+            if (store.GetValue(ref key, ref value) < 0)
+            {
+                return null;
+            }
+
+            try
+            {
+                return value.vt == VT_LPWSTR && value.pointer != IntPtr.Zero
+                    ? Marshal.PtrToStringUni(value.pointer)
+                    : null;
+            }
+            finally
+            {
+                PropVariantClear(ref value);
+            }
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(store);
+        }
+    }
+
+    [DllImport("ole32.dll")]
+    private static extern int PropVariantClear(ref PROPVARIANT value);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PROPERTYKEY
+    {
+        public Guid fmtid;
+        public uint pid;
+    }
+
+    [ComImport]
+    [Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IPropertyStore
+    {
+        [PreserveSig] int GetCount(out uint count);
+        [PreserveSig] int GetAt(uint index, out PROPERTYKEY key);
+        [PreserveSig] int GetValue(ref PROPERTYKEY key, ref PROPVARIANT value);
+        [PreserveSig] int SetValue(ref PROPERTYKEY key, ref PROPVARIANT value);
+        [PreserveSig] int Commit();
+    }
+
+    [ComImport]
+    [Guid("1BE09788-6894-4089-8586-9A2A6C265AC5")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IMMEndpoint
+    {
+        [PreserveSig] int GetDataFlow(out int dataFlow);
+    }
+
     private static string? DeviceId(IMMDevice device)
     {
         if (device.GetId(out var idPtr) < 0 || idPtr == IntPtr.Zero)
@@ -866,6 +1284,7 @@ internal sealed class AudioLoopback : IDisposable
     {
         [FieldOffset(0)] public ushort vt;
         [FieldOffset(8)] public uint blobSize;
+        [FieldOffset(8)] public IntPtr pointer;     // VT_LPWSTR and other pointer types
         [FieldOffset(16)] public IntPtr blobData;
     }
 
@@ -939,7 +1358,7 @@ internal sealed class AudioLoopback : IDisposable
     {
         [PreserveSig] int EnumAudioEndpoints(int dataFlow, uint stateMask, out IMMDeviceCollection devices);
         [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice device);
-        [PreserveSig] int GetDevice(string id, out IntPtr device);
+        [PreserveSig] int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IMMDevice device);
         [PreserveSig] int RegisterEndpointNotificationCallback(IntPtr client);
         [PreserveSig] int UnregisterEndpointNotificationCallback(IntPtr client);
     }

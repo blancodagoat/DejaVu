@@ -146,6 +146,129 @@ if (args.Length > 1 && args[0] == "audiopid" && int.TryParse(args[1], out int ta
     return 0;
 }
 
+// Live multi-device audio (#11): a -40 dBFS tone on a second output device must reach
+// the clip only when that device is ticked, and a minute of mixing must stay locked.
+// "multiaudio [device id or name part]"; defaults to the first non-default device.
+if (args.Length > 0 && args[0] == "multiaudio")
+{
+    var devices = AudioLoopback.ListRenderDevices();
+    foreach (var d in devices)
+    {
+        Console.WriteLine($"      {(d.IsDefault ? "DEFAULT " : "        ")}{d.Name}  {d.Id}");
+    }
+
+    Check("output devices listed", devices.Count > 0);
+    Check("one default, listed first", devices.Count(d => d.IsDefault) == 1 && devices[0].IsDefault);
+
+    var pick = args.Length > 1
+        ? devices.FirstOrDefault(d => !d.IsDefault && (d.Id == args[1] || d.Name.Contains(args[1], StringComparison.OrdinalIgnoreCase)))
+        : devices.FirstOrDefault(d => !d.IsDefault);
+    if (pick.Id is null)
+    {
+        Console.WriteLine("SKIP multiaudio: no second output device on this machine.");
+    }
+    else
+    {
+        var main = devices[0];
+        Console.WriteLine($"      extra device under test: {pick.Name}");
+
+        (double Level, string Route) Capture(string[] extras, int ms)
+        {
+            var path = Path.Combine(Path.GetTempPath(), "dejavu_multi.mp4");
+            string route;
+            using (var cap = AudioLoopback.TryStart(path, 0, extraDevices: extras))
+            {
+                if (cap is null)
+                {
+                    return (-1, "none");
+                }
+
+                route = cap.Route;
+                Thread.Sleep(ms);
+            }
+
+            double level = Mf.MeasureAudioLevel(path);
+            File.Delete(path);
+            return (level, route);
+        }
+
+        var unknown = Capture(["{0.0.0.00000000}.{00000000-0000-0000-0000-000000000000}"], 1000);
+        Check("an unknown extra device is skipped, not an error", unknown.Level >= 0, unknown.Route);
+        Eq("an unknown extra device leaves the route alone", unknown.Route, "full system mix (default device)");
+        var dup = Capture([main.Id], 1000);
+        Eq("the default device ticked as an extra is not mixed twice", dup.Route, "full system mix (default device)");
+
+        var quietMain = Capture([], 3000);
+        var quietBoth = Capture([pick.Id], 3000);
+        Check("route names the extra device", quietBoth.Route.EndsWith(" + " + pick.Name), quietBoth.Route);
+
+        using (new ToneRender(pick.Id))
+        {
+            Thread.Sleep(300);
+            var toneMain = Capture([], 3000);
+            var toneBoth = Capture([pick.Id], 3000);
+            Console.WriteLine(
+                $"      levels: default only {quietMain.Level:F4} -> {toneMain.Level:F4} with tone; "
+                + $"with extra {quietBoth.Level:F4} -> {toneBoth.Level:F4} with tone");
+
+            // A -40 dBFS sine averages 0.0064 in this measure.
+            Check("the extra device's tone reaches the mix when ticked",
+                toneBoth.Level - quietBoth.Level > 0.003, $"{quietBoth.Level:F4} -> {toneBoth.Level:F4}");
+            Check("the extra device's tone stays out when not ticked",
+                toneMain.Level - quietMain.Level < 0.0015, $"{quietMain.Level:F4} -> {toneMain.Level:F4}");
+
+            // A minute of mixing against the main stream's clock.
+            var path = Path.Combine(Path.GetTempPath(), "dejavu_multi_long.mp4");
+            using (var cap = AudioLoopback.TryStart(path, 0, extraDevices: [pick.Id]))
+            {
+                Check("long capture started", cap is not null);
+                if (cap is not null)
+                {
+                    int minBacklog = int.MaxValue, maxBacklog = 0;
+                    long settledUnderruns = 0;
+                    for (int s = 0; s < 60; s++)
+                    {
+                        Thread.Sleep(1000);
+                        var st = cap.ExtraStats.Single();
+                        if (s == 5)
+                        {
+                            settledUnderruns = st.Underruns;
+                        }
+
+                        if (s >= 5)
+                        {
+                            minBacklog = Math.Min(minBacklog, st.Backlog);
+                            maxBacklog = Math.Max(maxBacklog, st.Backlog);
+                        }
+
+                        if (s % 15 == 14)
+                        {
+                            Console.WriteLine(
+                                $"      t={s + 1}s ratio {st.Ratio:F6} backlog {st.Backlog} frames, dropped {st.Dropped}, underruns {st.Underruns}, dead {st.Dead}");
+                        }
+                    }
+
+                    var end = cap.ExtraStats.Single();
+                    Check("a minute of mixing never trimmed", end.Dropped == 0, $"dropped {end.Dropped}");
+                    Check("the extra device stayed alive", !end.Dead);
+                    Check("a steady tone never ran the extra dry once settled", end.Underruns == settledUnderruns,
+                        $"underruns {settledUnderruns} -> {end.Underruns}");
+                    Check("backlog held near the cushion", maxBacklog < 48000 / 10,
+                        $"backlog {minBacklog}..{maxBacklog} frames");
+                    Console.WriteLine($"      backlog over the minute: {minBacklog}..{maxBacklog} frames, final ratio {end.Ratio:F6}");
+                }
+            }
+
+            double longLevel = Mf.MeasureAudioLevel(path);
+            Check("the minute-long clip carries the tone", longLevel - quietBoth.Level > 0.003, $"{longLevel:F4}");
+            File.Delete(path);
+        }
+    }
+
+    Console.WriteLine($"{passed} passed, {failed} failed");
+    return failed == 0 ? 0 : 1;
+}
+
 // Field diagnosis: can Media Foundation open and decode this file on this machine?
 if (args.Length > 1 && args[0] == "probefile")
 {
@@ -436,6 +559,46 @@ Eq("cap off-by-nothing at exact fit",
     ReplayBuffer.SelectClipsOverCap(clips, 4 * gb).Count, 0);
 Eq("oversized single clip survives alone",
     ReplayBuffer.SelectClipsOverCap([("only", 3 * gb, now)], gb).Count, 0);
+
+// Extra audio devices (#11): mixed in on their own clocks, drift-corrected.
+DriftTests.Run(Check);
+
+// Extra audio devices in config.json: a new, optional key. A 1.4 config without it
+// loads with every setting intact and is NOT rewritten just to add it.
+{
+    const string v14 = """
+    {
+      "bufferMinutes": 15, "quality": "Medium", "fps": 120, "saveHotkey": "Ctrl+F9",
+      "saveRoot": "D:\\Clips", "showIndicator": false, "indicatorStyle": "icon",
+      "systemAudio": true, "microphone": true, "clipCapGB": 25, "captureTarget": "auto",
+      "captureBackend": "duplication", "audioExclude": ["Discord"], "appAudioOnly": false,
+      "saveSound": false, "updateNotify": true
+    }
+    """;
+    var old = AppConfig.Parse(v14, out bool oldRewrite);
+    Check("1.4 config parses", old is not null);
+    Check("1.4 config is not rewritten for the new key", !oldRewrite);
+    Eq("1.4 config has no extra devices", old?.ExtraAudioDevices.Length, 0);
+    Check("1.4 config keeps its settings",
+        old is { BufferMinutes: 15, Quality: Quality.Medium, Fps: 120, Microphone: true, ClipCapGB: 25,
+            CaptureBackend: "duplication", AppAudioOnly: false, SaveSound: false, UpdateNotify: true, ShowIndicator: false }
+        && old.SaveRoot == @"D:\Clips" && old.AudioExclude.SequenceEqual(["Discord"]));
+
+    var withExtras = AppConfig.Parse(v14.Replace("\"updateNotify\": true",
+        "\"updateNotify\": true, \"extraAudioDevices\": "
+        + "[\"{0.0.0.00000000}.{chat}\", \"\", null, \"{0.0.0.00000000}.{CHAT}\", \"{0.0.0.00000000}.{aux}\"]"),
+        out bool extrasRewrite);
+    Check("extra devices parse without a rewrite", withExtras is not null && !extrasRewrite);
+    Eq("extra devices: blanks dropped, duplicates folded case-insensitively",
+        string.Join("|", withExtras?.ExtraAudioDevices ?? []), "{0.0.0.00000000}.{chat}|{0.0.0.00000000}.{aux}");
+
+    Check("a malformed config is not parsed", AppConfig.Parse("{ not json", out _) is null);
+
+    // Round trip: what Save writes, Parse reads back.
+    var roundTrip = AppConfig.Parse(new AppConfig { ExtraAudioDevices = ["{x}", "{y}"] }.ToJson(), out bool rtRewrite);
+    Eq("extra devices round-trip", string.Join("|", roundTrip?.ExtraAudioDevices ?? []), "{x}|{y}");
+    Check("a saved config needs no rewrite", !rtRewrite);
+}
 
 // Update check: pure parsing over canned GitHub releases JSON. The rolling "latest"
 // tag and prereleases must be ignored; only a newer stable vX.Y.Z counts.

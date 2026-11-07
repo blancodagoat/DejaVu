@@ -474,12 +474,12 @@ internal sealed class ReplayBuffer : IDisposable
             if (config.AppAudioOnly && window != IntPtr.Zero)
             {
                 audio = AudioLoopback.TryStart(path!, ResolveAudioPid(window), includeOnly: true,
-                    system: config.SystemAudio, mic: config.Microphone);
+                    system: config.SystemAudio, mic: config.Microphone, extraDevices: config.ExtraAudioDevices);
             }
             else
             {
                 audio = AudioLoopback.TryStart(path!, FindExcludePid(),
-                    system: config.SystemAudio, mic: config.Microphone);
+                    system: config.SystemAudio, mic: config.Microphone, extraDevices: config.ExtraAudioDevices);
             }
 
             bool warn;

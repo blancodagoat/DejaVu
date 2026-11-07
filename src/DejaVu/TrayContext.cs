@@ -197,6 +197,14 @@ internal sealed class TrayContext : ApplicationContext
 
         menu.Items.Add(Toggle("System audio", () => config.SystemAudio,
             v => { config.SystemAudio = v; buffer.Restart(); }));
+        // Virtual mixers (SteelSeries Sonar, Elgato Wave Link) put game and chat on
+        // separate outputs, and the default device alone misses one of them (#11).
+        var audioDevices = new ToolStripMenuItem("Audio devices");
+        audioDevices.DropDown.Renderer = new DarkMenuRenderer();
+        audioDevices.DropDownOpening += (_, _) => RebuildAudioDevicesMenu(audioDevices);
+        // A placeholder so the submenu arrow shows; listing devices waits for the first open.
+        audioDevices.DropDownItems.Add(new ToolStripMenuItem("Listing devices…") { Enabled = false });
+        menu.Items.Add(audioDevices);
         menu.Items.Add(Toggle("Microphone", () => config.Microphone,
             v => { config.Microphone = v; buffer.Restart(); }));
         // The simple path to the audioExclude config list. Toggling on resets any
@@ -309,6 +317,82 @@ internal sealed class TrayContext : ApplicationContext
         menu.Items.Add(new ToolStripMenuItem("Change replays folder…", null, (_, _) => ChangeSaveFolder()));
         menu.Items.Add(new ToolStripMenuItem("Exit", null, (_, _) => ExitThread()));
         return menu;
+    }
+
+    /// <summary>
+    /// The output devices recorded: the default always (it carries the main mix, with
+    /// Discord kept out), plus any the user ticks, each recorded whole and mixed in.
+    /// Rebuilt on every open, because devices come and go with USB headsets and mixer
+    /// restarts.
+    /// </summary>
+    private void RebuildAudioDevicesMenu(ToolStripMenuItem parent)
+    {
+        // Off the UI thread and bounded: a wedged audio service must not freeze the menu.
+        var listing = Task.Run(AudioLoopback.ListRenderDevices);
+        var devices = listing.Wait(TimeSpan.FromSeconds(1.5)) ? listing.Result : null;
+
+        parent.DropDownItems.Clear();
+        if (devices is null || devices.Count == 0)
+        {
+            parent.DropDownItems.Add(new ToolStripMenuItem(
+                devices is null ? "Audio devices not responding" : "No output devices found") { Enabled = false });
+            return;
+        }
+
+        foreach (var device in devices)
+        {
+            if (device.IsDefault)
+            {
+                parent.DropDownItems.Add(new ToolStripMenuItem(device.Name + " (default)")
+                {
+                    Checked = true,
+                    Enabled = false,
+                });
+                continue;
+            }
+
+            var id = device.Id;
+            parent.DropDownItems.Add(new ToolStripMenuItem(device.Name, null, (_, _) => ToggleExtraDevice(id))
+            {
+                Checked = config.ExtraAudioDevices.Contains(id, StringComparer.OrdinalIgnoreCase),
+            });
+        }
+
+        // Ticked devices that are unplugged right now stay ticked in the config; showing
+        // them is the only way to untick one without editing config.json.
+        foreach (var id in config.ExtraAudioDevices)
+        {
+            if (!devices.Any(d => string.Equals(d.Id, id, StringComparison.OrdinalIgnoreCase)))
+            {
+                parent.DropDownItems.Add(new ToolStripMenuItem("Disconnected device", null, (_, _) => ToggleExtraDevice(id))
+                {
+                    Checked = true,
+                    ToolTipText = "Ticked, but not plugged in. Recorded again when it comes back; click to forget it.",
+                });
+            }
+        }
+
+        parent.DropDownItems.Add(new ToolStripSeparator());
+        parent.DropDownItems.Add(new ToolStripMenuItem(
+            config.SystemAudio
+                ? "Ticked devices are recorded whole, Discord included"
+                : "System audio is off, so none are recorded") { Enabled = false });
+    }
+
+    private void ToggleExtraDevice(string id)
+    {
+        var ticked = config.ExtraAudioDevices.ToList();
+        if (ticked.RemoveAll(t => string.Equals(t, id, StringComparison.OrdinalIgnoreCase)) == 0)
+        {
+            ticked.Add(id);
+        }
+
+        config.ExtraAudioDevices = ticked.ToArray();
+        config.Save();
+        if (config.SystemAudio)
+        {
+            buffer.Restart();
+        }
     }
 
     /// <summary>
