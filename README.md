@@ -10,7 +10,9 @@
 
 `one exe` · `any GPU` · `no account` · `no uploads` · `no telemetry`
 
-<img src="assets/screenshot.png" width="760" alt="The Replay recovered notification: a crashed session's buffer saved as a clip on the next launch">
+<a href="https://github.com/blancodagoat/DejaVu/releases/download/v1.5.0/dejavu-1.5.mp4"><img src="assets/demo.webp" width="760" alt="DejaVu in 20 seconds: Alt+F10 saves the play that just happened, the new Audio devices menu puts voice chat in the clip, and a crash still leaves the buffer"></a>
+
+<sub>Watch it with sound: <a href="https://github.com/blancodagoat/DejaVu/releases/download/v1.5.0/dejavu-1.5.mp4">dejavu-1.5.mp4</a> · music: Sascha Ende, ende.app (CC BY 4.0)</sub>
 
 </div>
 

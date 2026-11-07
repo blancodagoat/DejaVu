@@ -58,3 +58,7 @@ audio track.
 ## Also
 
 - When a segment fails to finalize, its audio capture is still released.
+
+## Launch video
+
+The README now shows DejaVu in 20 seconds instead of a screenshot; the full video with sound is attached below as `dejavu-1.5.mp4`. Music: Sascha Ende, ende.app (CC BY 4.0).
