@@ -45,6 +45,8 @@ audio track.
   "Disconnected device" so you can untick them.
 - If you make a ticked device your default output, it isn't recorded twice: DejaVu
   notices the switch straight away.
+- A virtual mixer's own effects (Sonar's ducking or voice processing, for example)
+  are recorded the way they sound: DejaVu records each device's output as is.
 - Needs *System audio* on.
 - Your config carries over as is: the new `extraAudioDevices` key is optional, and a
   1.4 config without it isn't rewritten.
