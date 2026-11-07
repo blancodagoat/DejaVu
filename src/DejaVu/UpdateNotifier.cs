@@ -5,13 +5,12 @@ namespace DejaVu;
 /// home" stays literally true until the user flips the tray toggle. When on: one
 /// releases-API request shortly after launch and every six hours after — a new release
 /// reaches running installs within hours instead of whenever someone remembers to
-/// click, and four tiny requests a day sit far under GitHub's anonymous rate limit.
+/// click, and four tiny requests a day are nothing for the project's server.
 /// Each found version notifies once; failures are silent, because a blocked proxy or
 /// an offline evening must not toast every cycle.
 /// </summary>
 /// <summary>A scoop install updates through scoop — handing those users a raw exe
-/// download would orphan their package. Everyone else gets nudged toward scoop, so the
-/// app becomes an *installed* thing with one-command updates instead of a loose exe.</summary>
+/// download would orphan their package. Everyone else gets the download link.</summary>
 internal static class ScoopInstall
 {
     public static bool Active =>

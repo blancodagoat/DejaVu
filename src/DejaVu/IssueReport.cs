@@ -37,7 +37,7 @@ internal static class IssueReport
                 // Another app holding the clipboard: the invite still opens.
             }
 
-            Process.Start(new ProcessStartInfo(AppInfo.SupportInvite) { UseShellExecute = true });
+            OpenInvite();
         }
         catch
         {
@@ -45,6 +45,19 @@ internal static class IssueReport
         }
 
         return copied;
+    }
+
+    /// <summary>Opens the DejaVu Discord invite in the browser; never throws.</summary>
+    public static void OpenInvite()
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(AppInfo.SupportInvite) { UseShellExecute = true });
+        }
+        catch
+        {
+            // No browser: the balloon text carries the invite too.
+        }
     }
 
     /// <summary>Pure so the tests can assert on it; Open supplies the live values. Always

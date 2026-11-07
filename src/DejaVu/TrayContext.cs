@@ -64,8 +64,12 @@ internal sealed class TrayContext : ApplicationContext
                 pendingReport = null;
                 bool copied = IssueReport.Open(report);
                 Balloon(copied ? "Log copied" : "Report it on Discord",
-                    copied ? "Paste it in #support on the DejaVu Discord." : "Describe what happened in #support on the DejaVu Discord.",
+                    (copied ? "Paste it in #support on the DejaVu Discord" : "Describe what happened in #support on the DejaVu Discord")
+                        + " (discord.gg/NHke2BwRA6). Click to open it again.",
                     ToolTipIcon.Info);
+                // Balloon() just cleared both pending actions: a click on this one reopens
+                // the invite instead of falling through to the last saved clip.
+                pendingUpdate = () => IssueReport.OpenInvite();
             }
             else
             {

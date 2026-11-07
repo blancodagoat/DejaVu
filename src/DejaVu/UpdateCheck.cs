@@ -39,7 +39,8 @@ internal static class UpdateCheck
 
         foreach (var release in doc.RootElement.EnumerateArray())
         {
-            if (release.TryGetProperty("prerelease", out var pre) && pre.GetBoolean())
+            if ((release.TryGetProperty("prerelease", out var pre) && pre.GetBoolean())
+                || (release.TryGetProperty("draft", out var draft) && draft.GetBoolean()))
             {
                 continue;
             }
