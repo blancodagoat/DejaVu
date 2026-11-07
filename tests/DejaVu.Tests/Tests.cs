@@ -676,24 +676,32 @@ SignalAnalysisTests.Run((name, ok, detail) => Check(name, ok, detail));
         UpdateCheck.ParseNewest(releases, new Version(1, 2, 0)) is null);
     Check("four-part local version compares as equal",
         UpdateCheck.ParseNewest("""[{"tag_name":"v1.0.0","prerelease":false,"html_url":"x"}]""", new Version(1, 0, 0, 0)) is null);
+    // Forgejo's releases API (the project's home since 1.5.1) uses GitHub's field names.
+    const string forgejo = """[{"id":96,"tag_name":"v1.5.0","name":"v1.5.0","draft":false,"prerelease":false,"html_url":"https://git.blancodagoat.dev/blancodagoat/DejaVu/releases/tag/v1.5.0"}]""";
+    Check("update check reads a Forgejo release",
+        UpdateCheck.ParseNewest(forgejo, new Version(1, 4, 0)) is { } f && f.Version == new Version(1, 5, 0)
+        && f.Url.StartsWith(AppInfo.ProjectUrl + "/releases/"));
 }
 
-// Issue reporting: the prefilled new-issue URL must scrub identity and stay under
-// GitHub's URL limit no matter how large the log tail is.
+// Issue reporting: the clipboard report must scrub identity and fit one Discord message
+// (2000 characters) no matter how large the log tail is.
 {
-    var url = IssueReport.BuildUrl(
+    var report = IssueReport.BuildReport(
         "Recording failed", "v1.0 · Windows 10.0.26200 · AV1 hw: no",
         @"2026-08-12 saved C:\Users\casey\Videos\DejaVu\clip.mp4", @"C:\Users\casey", "casey");
-    Check("issue url targets the repo", url.StartsWith(AppInfo.GitHubUrl + "/issues/new?title="));
-    Check("issue url carries the log", url.Contains(Uri.EscapeDataString("clip.mp4")));
-    Check("issue url leaks no username", !url.Contains("casey", StringComparison.OrdinalIgnoreCase));
+    Check("report names what happened", report.StartsWith("**What happened:** Recording failed"));
+    Check("report carries the environment", report.Contains("AV1 hw: no"));
+    Check("report carries the log", report.Contains("clip.mp4"));
+    Check("report leaks no username", !report.Contains("casey", StringComparison.OrdinalIgnoreCase));
+    Check("support invite is the DejaVu Discord", AppInfo.SupportInvite == "https://discord.gg/NHke2BwRA6");
 
     Eq("scrub folds profile path first",
         IssueReport.Scrub(@"C:\Users\casey\x and casey again", @"C:\Users\casey", "casey"),
         "~\\x and <user> again");
 
-    var huge = IssueReport.BuildUrl("t", "e", new string('x', 100_000), @"C:\Users\casey", "casey");
-    Check("huge log tail stays under GitHub's URL limit", huge.Length < 8_000, $"{huge.Length} chars");
+    var huge = IssueReport.BuildReport("t", "e", new string('x', 100_000), @"C:\Users\casey", "casey");
+    Check("huge log tail still fits one Discord message", huge.Length <= IssueReport.MaxReportChars, $"{huge.Length} chars");
+    Check("a cut report still closes its code block", huge.EndsWith("```"));
 }
 
 // AV1 self-test at the primary display's size, timed. Needs a GPU with hardware AV1;

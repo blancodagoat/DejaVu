@@ -62,7 +62,10 @@ internal sealed class TrayContext : ApplicationContext
             else if (pendingReport is { } report)
             {
                 pendingReport = null;
-                IssueReport.Open(report);
+                bool copied = IssueReport.Open(report);
+                Balloon(copied ? "Log copied" : "Report it on Discord",
+                    copied ? "Paste it in #support on the DejaVu Discord." : "Describe what happened in #support on the DejaVu Discord.",
+                    ToolTipIcon.Info);
             }
             else
             {
@@ -276,7 +279,7 @@ internal sealed class TrayContext : ApplicationContext
             {
                 // Proxies, TLS inspection, rate limits and plain blocks all land here;
                 // the actual reason beats a generic "try again later".
-                Balloon("Update check failed", "Couldn't reach GitHub: " + ex.Message, ToolTipIcon.Warning);
+                Balloon("Update check failed", "Couldn't reach git.blancodagoat.dev: " + ex.Message, ToolTipIcon.Warning);
             }
             finally
             {
@@ -287,7 +290,7 @@ internal sealed class TrayContext : ApplicationContext
 
         var notify = Toggle("Notify about new versions", () => config.UpdateNotify,
             v => config.UpdateNotify = v);
-        notify.ToolTipText = "Checks GitHub a few times a day, which means GitHub sees your IP. "
+        notify.ToolTipText = "Checks git.blancodagoat.dev a few times a day, which means that server sees your IP. "
             + "Off (the default), the app never phones home.";
         menu.Items.Add(notify);
 
@@ -712,19 +715,19 @@ internal sealed class TrayContext : ApplicationContext
         else
         {
             Balloon("Update available",
-                $"{AppInfo.Name} v{version} is out — click to download. Tip: \"scoop install {AppInfo.Name.ToLowerInvariant()}\" makes updates one command.",
+                $"{AppInfo.Name} v{version} is out — click to download.",
                 ToolTipIcon.Info);
             pendingUpdate = () => Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
         }
     }
 
     /// <summary>
-    /// A failure balloon whose click opens a prefilled GitHub issue in the browser —
-    /// the user reviews and submits it there, or closes the tab; the app sends nothing.
+    /// A failure balloon whose click copies a report to the clipboard and opens the DejaVu
+    /// Discord: the user pastes it in #support, or doesn't; the app sends nothing.
     /// </summary>
     private void FailureBalloon(string title, string text, ToolTipIcon icon)
     {
-        Balloon(title, text + " Click to report this on GitHub.", icon);
+        Balloon(title, text + " Click to report this on Discord.", icon);
         pendingReport = title;
     }
 

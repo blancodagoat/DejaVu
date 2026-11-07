@@ -3,7 +3,11 @@ namespace DejaVu;
 internal static class AppInfo
 {
     public const string Name = "DejaVu";
-    public const string GitHubUrl = "https://github.com/blancodagoat/dejavu";
+    /// <summary>Where the source and the releases live (moved off GitHub in 1.5.1).</summary>
+    public const string ProjectUrl = "https://git.blancodagoat.dev/blancodagoat/DejaVu";
+
+    /// <summary>The DejaVu Discord, where bug reports go. A permanent invite.</summary>
+    public const string SupportInvite = "https://discord.gg/NHke2BwRA6";
 
     private static string? renamedTo;
 

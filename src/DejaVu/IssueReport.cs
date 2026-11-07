@@ -3,36 +3,53 @@ using System.Diagnostics;
 namespace DejaVu;
 
 /// <summary>
-/// Failure reporting that keeps "never phones home" literally true: the app only builds
-/// a prefilled new-issue URL and hands it to the browser, where the user reads exactly
-/// what would be sent and submits it themselves — or closes the tab. Offered only from
-/// failure balloons, never on a timer and never on first run.
+/// Failure reporting that keeps "never phones home" literally true: the app copies a short
+/// report (what happened, the environment, a scrubbed log tail) to the clipboard and opens
+/// the DejaVu Discord, where the user reads it and pastes it in #support themselves, or
+/// doesn't. Offered only from failure balloons, never on a timer and never on first run.
 /// </summary>
 internal static class IssueReport
 {
-    // GitHub 414s somewhere past 8 KB of URL; the encoded log tail is the bulk of it.
-    private const int MaxLogChars = 1800;
+    // A Discord message holds 2000 characters; the report around the log tail takes ~250.
+    private const int MaxLogChars = 1400;
+    public const int MaxReportChars = 2000;
 
-    public static void Open(string context)
+    /// <summary>Copies the report and opens the invite. True when the copy worked. Runs on
+    /// the tray's UI thread, which is STA, as the clipboard needs.</summary>
+    public static bool Open(string context)
     {
+        bool copied = false;
         try
         {
             var environment =
                 $"v{UpdateCheck.Current} · Windows {Environment.OSVersion.Version} · " +
                 $"AV1 hw: {(CaptureEngine.Av1Available ? "yes" : "no")}" +
                 (CaptureEngine.Av1Available && CaptureEngine.Av1.Rejected ? " (off this session)" : string.Empty);
-            var url = BuildUrl(context, environment, AppLog.Tail(MaxLogChars),
+            var report = BuildReport(context, environment, AppLog.Tail(MaxLogChars),
                 Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), Environment.UserName);
-            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            try
+            {
+                Clipboard.SetText(report);
+                copied = true;
+            }
+            catch
+            {
+                // Another app holding the clipboard: the invite still opens.
+            }
+
+            Process.Start(new ProcessStartInfo(AppInfo.SupportInvite) { UseShellExecute = true });
         }
         catch
         {
             // Reporting must never hurt the app.
         }
+
+        return copied;
     }
 
-    /// <summary>Pure so the tests can assert on it; Open supplies the live values.</summary>
-    public static string BuildUrl(
+    /// <summary>Pure so the tests can assert on it; Open supplies the live values. Always
+    /// fits one Discord message.</summary>
+    public static string BuildReport(
         string context, string environment, string logTail, string userProfile, string userName)
     {
         if (logTail.Length > MaxLogChars)
@@ -40,14 +57,13 @@ internal static class IssueReport
             logTail = logTail[^MaxLogChars..];
         }
 
-        var body =
-            $"**What happened:** {context}\n\n" +
-            $"**Environment:** {environment}\n\n" +
-            "**Log tail:**\n```\n" + Scrub(logTail, userProfile, userName) + "\n```\n";
-
-        return $"{AppInfo.GitHubUrl}/issues/new" +
-            $"?title={Uri.EscapeDataString($"{context} (from the app)")}" +
-            $"&body={Uri.EscapeDataString(body)}";
+        const string nl = "\n";
+        const string fence = "```";
+        var report =
+            $"**What happened:** {context}" + nl +
+            $"**Environment:** {environment}" + nl +
+            "**Log tail:**" + nl + fence + nl + Scrub(logTail, userProfile, userName) + nl + fence;
+        return report.Length <= MaxReportChars ? report : report[..(MaxReportChars - 4)] + nl + fence;
     }
 
     /// <summary>Log lines carry paths; paths carry the username. Neither belongs in a public issue.</summary>

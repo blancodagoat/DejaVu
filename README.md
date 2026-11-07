@@ -62,7 +62,7 @@ That's the entire app. There is no main window and nothing to set up; every sett
 | Clip folder cap | Off / 10 / 25 / 50 GB |
 | Hotkey | Click-to-rebind dialog |
 | Corner indicator | Off, the red dot, or the app icon. It sits on the display being recorded, stays above fullscreen games, and never appears in your clips |
-| Notify about new versions | Off by default, so the app stays silent on the network. On, it asks GitHub a few times a day; on a scoop install, clicking the update balloon runs the whole update and restarts the app |
+| Notify about new versions | Off by default, so the app stays silent on the network. On, it asks git.blancodagoat.dev a few times a day; on a scoop install, clicking the update balloon runs the whole update and restarts the app |
 
 > **Yellow border on Windows 10?** That is the OS telling you something is capturing the
 > screen, and Windows 10 has no setting for it. Switch *Capture method* to Desktop
@@ -124,8 +124,8 @@ DejaVu is built for roughly 2015 machines and up:
 <br>
 
 - The buffer lives in `%LOCALAPPDATA%\DejaVu\buffer` and is wiped on a clean exit. After a crash it becomes your recovered clip instead.
-- Nothing leaves your machine. No uploads, no account, no telemetry. The app never phones home; the update check in the tray menu runs only when you click it. The one exception is opt-in: turn on "Notify about new versions" and it asks GitHub a few times a day, which means GitHub sees your IP.
-- Failure balloons offer "click to report": that click only opens a prefilled GitHub issue in your browser (with the log tail, usernames scrubbed) for you to review and submit, or just close. The app itself sends nothing, ever.
+- Nothing leaves your machine. No uploads, no account, no telemetry. The app never phones home; the update check in the tray menu runs only when you click it. The one exception is opt-in: turn on "Notify about new versions" and it asks git.blancodagoat.dev a few times a day, which means that server sees your IP.
+- Failure balloons offer "click to report": that click copies a short report (what happened, your Windows version, the log tail, usernames scrubbed) to the clipboard and opens the [DejaVu Discord](https://discord.gg/NHke2BwRA6), where you paste it in #support, or don't. The app itself sends nothing, ever.
 - Pause buffering any time from the tray; the dot turns grey.
 - The mic is off unless you turn it on, and Discord voices are kept out of the mix by default.
 
