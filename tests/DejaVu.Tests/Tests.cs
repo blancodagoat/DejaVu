@@ -143,6 +143,7 @@ if (args.Length > 1 && args[0] == "audiopid" && int.TryParse(args[1], out int ta
                 return -1;
             }
 
+            Console.WriteLine($"      route ({(include ? "include" : "exclude")} {pid}): {cap.Route}");
             Thread.Sleep(4000);
         }
 

@@ -1105,6 +1105,14 @@ internal sealed class AudioLoopback : IDisposable
                 return null;
             }
 
+            // An app often keeps sessions on several devices: a game plays on Sonar Gaming
+            // and keeps an idle session on Sonar Chat for its own voice chat. Taking the
+            // first device found picked Chat and recorded that whole device, Discord
+            // included, past Keep Discord out. The device where the app is PLAYING wins;
+            // among those the default (which process loopback can isolate the app on);
+            // only with no playing session anywhere does an idle one decide, again
+            // preferring the default.
+            (IMMDevice Device, bool IsDefault)? playing = null, idle = null;
             try
             {
                 Mf.Check(devices.GetCount(out int count));
@@ -1115,12 +1123,28 @@ internal sealed class AudioLoopback : IDisposable
                         continue;
                     }
 
-                    if (HasSessionFor(device, pid))
+                    if (!HasSessionFor(device, pid))
                     {
-                        return (device, DeviceId(device) == defaultId);
+                        Marshal.ReleaseComObject(device);
+                        continue;
                     }
 
-                    Marshal.ReleaseComObject(device);
+                    bool isDefault = DeviceId(device) == defaultId;
+                    bool active = HasSessionFor(device, owner => owner == (uint)pid, activeOnly: true);
+                    ref var slot = ref active ? ref playing : ref idle;
+                    if (slot is null || (isDefault && !slot.Value.IsDefault))
+                    {
+                        if (slot is { } replaced)
+                        {
+                            Marshal.ReleaseComObject(replaced.Device);
+                        }
+
+                        slot = (device, isDefault);
+                    }
+                    else
+                    {
+                        Marshal.ReleaseComObject(device);
+                    }
                 }
             }
             finally
@@ -1128,7 +1152,17 @@ internal sealed class AudioLoopback : IDisposable
                 Marshal.ReleaseComObject(devices);
             }
 
-            return null;
+            if (playing is { } chosen)
+            {
+                if (idle is { } unused)
+                {
+                    Marshal.ReleaseComObject(unused.Device);
+                }
+
+                return chosen;
+            }
+
+            return idle;
         }
         catch
         {
