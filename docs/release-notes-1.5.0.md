@@ -37,14 +37,18 @@ audio track.
 
 - Each device runs on its own clock, so its sound is resampled on the fly to stay in
   sync with the rest over the full 25-minute buffer.
-- A ticked device is recorded whole: *Keep Discord out of clips* applies to the
-  default device only.
+- A ticked device is recorded whole, Discord included. With *Keep Discord out of clips*
+  on, Discord stays out of everything unless it plays only on ticked devices (for
+  example Discord set to Sonar Chat, with Chat ticked). That is checked when each
+  one-minute segment starts, so joining a call mid-segment can miss up to a minute.
 - A device that is unplugged, or disappears mid-recording (say, a Sonar restart),
   only loses its own sound. The buffer keeps going and picks the device up again at
   the next one-minute segment. Ticked devices that are unplugged show as
   "Disconnected device" so you can untick them.
 - If you make a ticked device your default output, it isn't recorded twice: DejaVu
-  notices the switch straight away.
+  notices the switch straight away and leaves that device's own stream out until the
+  next segment. With *Captured app audio only* on, that also leaves out its other
+  sound (voice chat, for example) for up to a minute.
 - A virtual mixer's own effects (Sonar's ducking or voice processing, for example)
   are recorded the way they sound: DejaVu records each device's output as is.
 - Needs *System audio* on.

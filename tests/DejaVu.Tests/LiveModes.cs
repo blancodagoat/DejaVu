@@ -994,7 +994,7 @@ internal static class LiveModes
             Console.WriteLine($"      [{label}] route {route}; switched at {switchAt:F1} s, back at {backAt:F1} s");
             Check($"{label}: the route hears every device (process loopback)", route.Contains("process loopback"), route);
             Check($"{label}: the extra was muted once, on the switch",
-                tap.Count("now the default device, already in the system mix") == 1,
+                tap.Count("now the default device; its own stream is left out") == 1,
                 $"{tap.Count("now the default device")} lines");
         }
 

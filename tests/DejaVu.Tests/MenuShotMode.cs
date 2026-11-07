@@ -180,7 +180,7 @@ internal static class MenuShotMode
         Check("layout: the unplugged ticked device shows as Disconnected device, ticked", disconnected is { Checked: true, Enabled: true });
         var note = subItems.LastOrDefault();
         Check("layout: the note line closes the list, not clickable",
-            note is { Enabled: false } && note.Text == "Ticked devices are recorded whole, Discord included", note?.Text);
+            note is { Enabled: false } && note.Text is "Ticked devices are recorded whole, Discord included" or "Discord stays out, unless it plays only on ticked devices", note?.Text);
         Check("layout: a separator above the note", sub.Count > 1 && sub[^2].Separator);
 
         // --- what is on screen ---

@@ -390,9 +390,9 @@ internal sealed class TrayContext : ApplicationContext
 
         parent.DropDownItems.Add(new ToolStripSeparator());
         parent.DropDownItems.Add(new ToolStripMenuItem(
-            config.SystemAudio
-                ? "Ticked devices are recorded whole, Discord included"
-                : "System audio is off, so none are recorded") { Enabled = false });
+            !config.SystemAudio ? "System audio is off, so none are recorded"
+            : config.AudioExclude.Length > 0 ? "Discord stays out, unless it plays only on ticked devices"
+            : "Ticked devices are recorded whole, Discord included") { Enabled = false });
     }
 
     private void ToggleExtraDevice(string id)

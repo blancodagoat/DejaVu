@@ -52,7 +52,7 @@ That's the entire app. There is no main window and nothing to set up; every sett
 | Capture method | Windows Graphics Capture, or Desktop Duplication. Windows 10 paints a yellow border around anything the first one records and gives no way to turn it off; the second draws no border, at the cost of recording whole displays only |
 | System audio | On or off |
 | Microphone | Off by default. On mixes your default mic into the clip's audio |
-| Audio devices | The default output is always recorded. Tick any other output (SteelSeries Sonar Chat, an Elgato Wave Link mix, a second headset) and it is recorded too, mixed into the same track. A ticked device is recorded whole: Keep Discord out applies to the default device only, which for a chat device is the point |
+| Audio devices | The default output is always recorded. Tick any other output (SteelSeries Sonar Chat, an Elgato Wave Link mix, a second headset) and it is recorded too, mixed into the same track. A ticked device is recorded whole, Discord included. With Keep Discord out on, Discord stays out of everything unless it plays only on ticked devices (say, Discord set to Sonar Chat with Chat ticked); that is checked at the start of each one-minute segment |
 | Captured app audio only | On by default. With a window captured, the clip carries that app's audio alone, even when a virtual mixer like SteelSeries Sonar routes the app to its own output device |
 | Keep Discord out of clips | Applies to monitor capture; one click puts voice chat back into the mix |
 | Save sound | A chime when a clip saves, a low buzz when a save fails. Off if you prefer silence |

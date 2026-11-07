@@ -655,8 +655,8 @@ internal sealed class AudioLoopback : IDisposable
             if (!extra.Mixer.Muted && MuteOnDefaultChange(extra.Covers, newDefault, mainHearsEveryDevice))
             {
                 extra.Mixer.Mute();
-                AppLog.Write($"extra audio device {extra.Name}: now the default device, already in the system mix; "
-                    + "left out until the next segment");
+                AppLog.Write($"extra audio device {extra.Name}: now the default device; its own stream is left out "
+                    + "until the next segment, so it isn't recorded twice");
             }
         }
     }
@@ -1425,8 +1425,8 @@ internal sealed class AudioLoopback : IDisposable
         return id;
     }
 
-    /// <summary>Active render devices hosting an audio session of any pid in
-    /// <paramref name="tree"/>.</summary>
+    /// <summary>Active render devices where any pid in <paramref name="tree"/> is playing right
+    /// now (an active audio session; idle and expired sessions don't count).</summary>
     private static List<string> SessionDevices(IMMDeviceEnumerator enumerator, HashSet<uint> tree)
     {
         var found = new List<string>();
@@ -1449,7 +1449,7 @@ internal sealed class AudioLoopback : IDisposable
 
                     try
                     {
-                        if (HasSessionFor(device, tree.Contains) && DeviceId(device) is { } id)
+                        if (HasSessionFor(device, tree.Contains, activeOnly: true) && DeviceId(device) is { } id)
                         {
                             found.Add(id);
                         }
@@ -1541,7 +1541,13 @@ internal sealed class AudioLoopback : IDisposable
 
     private static bool HasSessionFor(IMMDevice device, int pid) => HasSessionFor(device, owner => owner == (uint)pid);
 
-    private static bool HasSessionFor(IMMDevice device, Func<uint, bool> owns)
+    // AudioSessionState: 0 inactive, 1 active (playing), 2 expired.
+    private const int AudioSessionStateActive = 1;
+
+    /// <param name="activeOnly">Count only sessions that are playing right now: Windows keeps
+    /// an app's idle sessions (a notification sound played once on the default device) until
+    /// the app exits, and those must not decide where its live audio is.</param>
+    private static bool HasSessionFor(IMMDevice device, Func<uint, bool> owns, bool activeOnly = false)
     {
         var mgrIid = IID_IAudioSessionManager2;
         if (device.Activate(ref mgrIid, 23 /* CLSCTX_ALL */, IntPtr.Zero, out var mgrPtr) < 0)
@@ -1571,7 +1577,8 @@ internal sealed class AudioLoopback : IDisposable
                     try
                     {
                         if (session is IAudioSessionControl2 details
-                            && details.GetProcessId(out uint owner) >= 0 && owns(owner))
+                            && details.GetProcessId(out uint owner) >= 0 && owns(owner)
+                            && (!activeOnly || (details.GetState(out int state) >= 0 && state == AudioSessionStateActive)))
                         {
                             return true;
                         }
@@ -1803,8 +1810,8 @@ internal sealed class AudioLoopback : IDisposable
     [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IAudioSessionControl2
     {
-        // IAudioSessionControl — stubs hold the vtable slots, never called.
-        [PreserveSig] int _GetState();
+        // IAudioSessionControl — stubs hold the vtable slots, never called (except GetState).
+        [PreserveSig] int GetState(out int state);
         [PreserveSig] int _GetDisplayName();
         [PreserveSig] int _SetDisplayName();
         [PreserveSig] int _GetIconPath();
