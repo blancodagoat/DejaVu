@@ -19,7 +19,8 @@ internal static class IssueReport
         {
             var environment =
                 $"v{UpdateCheck.Current} · Windows {Environment.OSVersion.Version} · " +
-                $"AV1 hw: {(CaptureEngine.Av1Available ? "yes" : "no")}";
+                $"AV1 hw: {(CaptureEngine.Av1Available ? "yes" : "no")}" +
+                (CaptureEngine.Av1Available && CaptureEngine.Av1.Rejected ? " (off this session)" : string.Empty);
             var url = BuildUrl(context, environment, AppLog.Tail(MaxLogChars),
                 Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), Environment.UserName);
             Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });

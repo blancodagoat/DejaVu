@@ -32,6 +32,7 @@
     <Compile Include="..\..\src\DejaVu\AppLog.cs" />
     <Compile Include="..\..\src\DejaVu\MfInterop.cs" />
     <Compile Include="..\..\src\DejaVu\AudioLoopback.cs" />
+    <Compile Include="..\..\src\DejaVu\Av1Gate.cs" />
     <Compile Include="..\..\src\DejaVu\CaptureEngine.cs" />
     <Compile Include="..\..\src\DejaVu\DesktopDuplication.cs" />
     <Compile Include="..\..\src\DejaVu\Mp4Concat.cs" />

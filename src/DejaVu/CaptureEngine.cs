@@ -19,12 +19,22 @@ internal sealed class CaptureEngine : IDisposable
     /// <summary>Probed once: a registered hardware AV1 encoder MFT.</summary>
     public static readonly bool Av1Available = ProbeAv1();
 
-    // The probe proves the machine has an AV1 encoder and decoder — not that the
-    // fragmented-MP4 sink can write what that encoder produces. Some stacks accept the
-    // sink writer, then fail every sample with "the sink could not create a valid output
-    // file because required headers were not provided" (#7), and the restart machinery
-    // rebuilt on AV1 forever. One failure poisons AV1 for the process.
-    private static volatile bool av1Rejected;
+    /// <summary>The session's AV1 verdict. The probe proves an AV1 encoder and decoder
+    /// exist, not that the fragmented-MP4 sink can write what the encoder produces; see
+    /// <see cref="Av1Gate"/> for when a failure takes AV1 out (#7, #9, #10).</summary>
+    internal static readonly Av1Gate Av1 = new();
+
+    /// <summary>Frames the startup self-test encodes: enough for the encoder's output
+    /// latency to reach the sink, which is where the header failure shows up.</summary>
+    private const int SelfTestFrames = 12;
+
+#if DEBUG
+    // Debug builds only, never Release: DEJAVU_DEBUG_AV1_FAIL=write makes AV1 writers fail
+    // the way #9/#10 do (a few samples accepted, then MF_E_SINK_HEADERS_NOT_FOUND), and
+    // =selftest fails the startup self-test the same way. Proves the H.264 fallback on a
+    // PC whose AV1 works.
+    private static readonly string? DebugAv1Fail = Environment.GetEnvironmentVariable("DEJAVU_DEBUG_AV1_FAIL");
+#endif
 
     /// <summary>How long a rotation waits for the writer lock before calling the engine
     /// dead. Rotation blocks on the previous segment's finalize, normally ~250 ms.</summary>
@@ -50,6 +60,7 @@ internal sealed class CaptureEngine : IDisposable
 
     private readonly object gate = new();
     private Mf.IMFSinkWriter? writer;
+    private string? writerPath;
     private int streamIndex;
     private long segmentEpochTicks = -1;
     private long nextDueTicks;
@@ -57,6 +68,16 @@ internal sealed class CaptureEngine : IDisposable
     private bool errored;
 
     public event Action<string>? Error;
+
+    /// <summary>This engine's AV1 writer failed in a way that takes AV1 out for the
+    /// session (see <see cref="Av1Gate"/>). Not an error to report: the owner rebuilds
+    /// the engine, which comes back on H.264. Raised once.</summary>
+    public event Action? CodecRejected;
+
+    /// <summary>Capture size: the encoder input, before <see cref="FitEncoder"/>.</summary>
+    public int Width => width;
+
+    public int Height => height;
 
     /// <summary>Frames written to the current segment file so far.</summary>
     public int FramesInSegment => framesInSegment;
@@ -85,43 +106,8 @@ internal sealed class CaptureEngine : IDisposable
     /// <paramref name="duplicate"/> asks for the Desktop Duplication source, which is
     /// ignored for a window target because DXGI duplicates outputs, not windows.</summary>
     public CaptureEngine(IntPtr monitor, IntPtr window, int fps, int quality, bool duplicate = false)
+        : this(fps, quality, Av1.Allows(Av1Available) ? Mf.VideoFormat_AV1 : Mf.VideoFormat_H264)
     {
-        this.fps = fps;
-        this.quality = quality;
-        frameTicks = TimeSpan.TicksPerSecond / fps;
-        Codec = Av1Available && !av1Rejected ? Mf.VideoFormat_AV1 : Mf.VideoFormat_H264;
-
-        Mf.EnsureStarted();
-
-        // One D3D11 device shared by capture and encode, multithread-protected because
-        // frame callbacks and the encoder touch it from different threads.
-        Mf.Check(D3D11CreateDevice(
-            IntPtr.Zero, 1 /* hardware */, IntPtr.Zero, 0x820 /* BGRA | VIDEO_SUPPORT */,
-            IntPtr.Zero, 0, 7 /* SDK version */, out d3dDevice, out _, out d3dContext));
-
-        var mtIid = IID_ID3D10Multithread;
-        Mf.Check(Marshal.QueryInterface(d3dContext, in mtIid, out var mtPtr));
-        var multithread = (ID3D10Multithread)Marshal.GetObjectForIUnknown(mtPtr);
-        Marshal.Release(mtPtr);
-        multithread.SetMultithreadProtected(true);
-        Marshal.ReleaseComObject(multithread);
-
-        Mf.Check(Mf.MFCreateDXGIDeviceManager(out uint resetToken, out deviceManager));
-        Mf.Check(deviceManager.ResetDevice(d3dDevice, resetToken));
-
-        var dxgiIid = IID_IDXGIDevice;
-        Mf.Check(Marshal.QueryInterface(d3dDevice, in dxgiIid, out var dxgiPtr));
-        try
-        {
-            Mf.Check(CreateDirect3D11DeviceFromDXGIDevice(dxgiPtr, out var inspectable));
-            winrtDevice = MarshalInterface<IDirect3DDevice>.FromAbi(inspectable);
-            Marshal.Release(inspectable);
-        }
-        finally
-        {
-            Marshal.Release(dxgiPtr);
-        }
-
         GraphicsCaptureItem? item = null;
         if (duplicate && window == IntPtr.Zero)
         {
@@ -153,19 +139,7 @@ internal sealed class CaptureEngine : IDisposable
 
         try
         {
-            // ARGB32, deliberately: MF maps it to B8G8R8A8 — the exact format of WGC frame
-            // textures. RGB32 would map to B8G8R8X8, and CopyResource silently no-ops on a
-            // format mismatch, encoding untouched (black) allocator textures. Diagnosed by
-            // decode-probing output that "looked" valid by size and duration.
-            inputType = CreateVideoType(Mf.VideoFormat_ARGB32, width, height, stride: width * 4);
-
-            // GPU-backed sample pool with hard backpressure: initial 2, max 6 in flight.
-            // A slow encoder empties the pool and frames drop — memory stays flat.
-            var allocIid = IID_IMFVideoSampleAllocatorEx;
-            Mf.Check(Mf.MFCreateVideoSampleAllocatorEx(ref allocIid, out var allocObj));
-            allocator = (Mf.IMFVideoSampleAllocatorEx)allocObj;
-            Mf.Check(allocator.SetDirectXManager(deviceManager));
-            Mf.Check(allocator.InitializeSampleAllocatorEx(2, 6, null, inputType));
+            (inputType, allocator) = CreateSamplePool();
 
             if (duplication is not null)
             {
@@ -211,11 +185,84 @@ internal sealed class CaptureEngine : IDisposable
         }
     }
 
+    /// <summary>The self-test's engine: the real device, sample pool and sink-writer
+    /// setup at the capture size, with no capture source behind it.</summary>
+    private CaptureEngine(int width, int height, int fps, int quality)
+        : this(fps, quality, Mf.VideoFormat_AV1)
+    {
+        this.width = width;
+        this.height = height;
+        (inputType, allocator) = CreateSamplePool();
+    }
+
+    /// <summary>The device half every engine shares.</summary>
+    private CaptureEngine(int fps, int quality, Guid codec)
+    {
+        this.fps = fps;
+        this.quality = quality;
+        frameTicks = TimeSpan.TicksPerSecond / fps;
+        Codec = codec;
+        // Sized from the capture source, which needs this device first; both chaining
+        // constructors assign the real pool.
+        inputType = null!;
+        allocator = null!;
+
+        Mf.EnsureStarted();
+
+        // One D3D11 device shared by capture and encode, multithread-protected because
+        // frame callbacks and the encoder touch it from different threads.
+        Mf.Check(D3D11CreateDevice(
+            IntPtr.Zero, 1 /* hardware */, IntPtr.Zero, 0x820 /* BGRA | VIDEO_SUPPORT */,
+            IntPtr.Zero, 0, 7 /* SDK version */, out d3dDevice, out _, out d3dContext));
+
+        var mtIid = IID_ID3D10Multithread;
+        Mf.Check(Marshal.QueryInterface(d3dContext, in mtIid, out var mtPtr));
+        var multithread = (ID3D10Multithread)Marshal.GetObjectForIUnknown(mtPtr);
+        Marshal.Release(mtPtr);
+        multithread.SetMultithreadProtected(true);
+        Marshal.ReleaseComObject(multithread);
+
+        Mf.Check(Mf.MFCreateDXGIDeviceManager(out uint resetToken, out deviceManager));
+        Mf.Check(deviceManager.ResetDevice(d3dDevice, resetToken));
+
+        var dxgiIid = IID_IDXGIDevice;
+        Mf.Check(Marshal.QueryInterface(d3dDevice, in dxgiIid, out var dxgiPtr));
+        try
+        {
+            Mf.Check(CreateDirect3D11DeviceFromDXGIDevice(dxgiPtr, out var inspectable));
+            winrtDevice = MarshalInterface<IDirect3DDevice>.FromAbi(inspectable);
+            Marshal.Release(inspectable);
+        }
+        finally
+        {
+            Marshal.Release(dxgiPtr);
+        }
+    }
+
+    private (Mf.IMFMediaType Input, Mf.IMFVideoSampleAllocatorEx Allocator) CreateSamplePool()
+    {
+        // ARGB32, deliberately: MF maps it to B8G8R8A8 — the exact format of WGC frame
+        // textures. RGB32 would map to B8G8R8X8, and CopyResource silently no-ops on a
+        // format mismatch, encoding untouched (black) allocator textures. Diagnosed by
+        // decode-probing output that "looked" valid by size and duration.
+        var input = CreateVideoType(Mf.VideoFormat_ARGB32, width, height, stride: width * 4);
+
+        // GPU-backed sample pool with hard backpressure: initial 2, max 6 in flight.
+        // A slow encoder empties the pool and frames drop — memory stays flat.
+        var allocIid = IID_IMFVideoSampleAllocatorEx;
+        Mf.Check(Mf.MFCreateVideoSampleAllocatorEx(ref allocIid, out var allocObj));
+        var pool = (Mf.IMFVideoSampleAllocatorEx)allocObj;
+        Mf.Check(pool.SetDirectXManager(deviceManager));
+        Mf.Check(pool.InitializeSampleAllocatorEx(2, 6, null, input));
+        return (input, pool);
+    }
+
     public void Start(string segmentPath)
     {
         lock (gate)
         {
             writer = CreateWriter(segmentPath);
+            writerPath = segmentPath;
             framesInSegment = 0;
             segmentEpochTicks = -1;
             errored = false;
@@ -233,6 +280,8 @@ internal sealed class CaptureEngine : IDisposable
     public void Rotate(string nextSegmentPath, Action<int>? onFinalized = null)
     {
         Mf.IMFSinkWriter? old;
+        string? oldPath;
+        Guid oldCodec;
         int frames;
         // Bounded, unlike the other holders of this gate: a WriteSample that never
         // returns keeps it forever, and rotation runs on the buffer's cycle timer while
@@ -247,8 +296,11 @@ internal sealed class CaptureEngine : IDisposable
         try
         {
             old = writer;
+            oldPath = writerPath;
+            oldCodec = Codec;
             frames = framesInSegment;
             writer = CreateWriter(nextSegmentPath);
+            writerPath = nextSegmentPath;
             framesInSegment = 0;
             segmentEpochTicks = -1;
             // One report per segment, not per engine: without the reset, an engine
@@ -264,14 +316,30 @@ internal sealed class CaptureEngine : IDisposable
         {
             Task.Run(() =>
             {
-                // Under the gate: Finalize while another thread is inside WriteSample
-                // deadlocks in Media Foundation. Frames arriving during the ~200 ms of
-                // finalization briefly block on the lock — still no lost seconds.
-                lock (gate)
+                try
                 {
-                    Finalize(old);
+                    // Under the gate: Finalize while another thread is inside WriteSample
+                    // deadlocks in Media Foundation. Frames arriving during the ~200 ms of
+                    // finalization briefly block on the lock — still no lost seconds.
+                    lock (gate)
+                    {
+                        Finalize(old);
+                    }
+
+                    VerifyFirstAv1Segment(oldPath, frames, oldCodec, raise: true);
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Write($"segment finalize failed: {ex.Message}");
+                    if (oldCodec == Mf.VideoFormat_AV1)
+                    {
+                        RejectAv1($"finalize: 0x{ex.HResult:X8}", ex.HResult, raise: true);
+                    }
                 }
 
+                // Even after a failed finalize: the owner disposes the segment's audio
+                // capture here and drops a video that does not decode. Skipping it
+                // leaked a live loopback per failure.
                 onFinalized?.Invoke(frames);
             });
         }
@@ -280,14 +348,84 @@ internal sealed class CaptureEngine : IDisposable
     /// <summary>Stops capture and finalizes the current segment. Blocking.</summary>
     public void Stop()
     {
+        string? path;
+        int frames;
         lock (gate)
         {
-            if (writer is not null)
+            if (writer is null)
             {
-                Finalize(writer);
-                writer = null;
+                return;
+            }
+
+            // Cleared before finalizing: a throwing Finalize has already released the
+            // writer, and the Stop inside Dispose must not finalize it a second time.
+            var old = writer;
+            path = writerPath;
+            frames = framesInSegment;
+            writer = null;
+            writerPath = null;
+            try
+            {
+                Finalize(old);
+            }
+            catch (Exception ex) when (Codec == Mf.VideoFormat_AV1)
+            {
+                // A save inside the first segment lands here, not in Rotate. The owner is
+                // already restarting or stopping, so no CodecRejected.
+                RejectAv1($"finalize: 0x{ex.HResult:X8}", ex.HResult, raise: false);
+                throw;
             }
         }
+
+        VerifyFirstAv1Segment(path, frames, Codec, raise: false);
+    }
+
+    /// <summary>
+    /// Until one AV1 segment has been read back, a finalized segment is the evidence of
+    /// whether this PC's AV1 path writes playable MP4: decoded, AV1 stays for the session
+    /// and later failures count as device losses; not decoded, AV1 is out. One decode
+    /// of one frame, and only for the session's first AV1 segment.
+    /// </summary>
+    private void VerifyFirstAv1Segment(string? path, int frames, Guid codec, bool raise)
+    {
+        if (codec != Mf.VideoFormat_AV1 || frames == 0 || path is null || Av1.Verified || Av1.Rejected)
+        {
+            return;
+        }
+
+        try
+        {
+            if (Mf.ProbeVideo(path, maxSamples: 1).Frames > 0)
+            {
+                Av1.OnSegmentVerified();
+                AppLog.Write("AV1 segment read back; AV1 stays on");
+                return;
+            }
+
+            RejectAv1("the first AV1 segment decoded to no frames", Av1Gate.SinkHeadersNotFound, raise);
+        }
+        catch (Exception ex)
+        {
+            RejectAv1($"the first AV1 segment did not read back: 0x{ex.HResult:X8}", ex.HResult, raise);
+        }
+    }
+
+    /// <summary>Feeds an AV1 failure to the gate; logs and, when asked, raises
+    /// <see cref="CodecRejected"/> only for the failure that takes AV1 out.</summary>
+    private bool RejectAv1(string why, int hresult, bool raise)
+    {
+        if (!Av1.OnFailure(hresult))
+        {
+            return false;
+        }
+
+        AppLog.Write($"AV1 cannot write MP4 on this PC ({why}); H264 for the rest of this session");
+        if (raise)
+        {
+            CodecRejected?.Invoke();
+        }
+
+        return true;
     }
 
     private static void Finalize(Mf.IMFSinkWriter old)
@@ -418,6 +556,12 @@ internal sealed class CaptureEngine : IDisposable
                     Mf.Check(sample.SetSampleTime(now - segmentEpochTicks));
                     Mf.Check(sample.SetSampleDuration(frameTicks));
                     stage = "write";
+#if DEBUG
+                    if (DebugAv1Fail == "write" && Codec == Mf.VideoFormat_AV1 && framesInSegment >= 3)
+                    {
+                        Marshal.ThrowExceptionForHR(Av1Gate.SinkHeadersNotFound);
+                    }
+#endif
                     Mf.Check(writer.WriteSample(streamIndex, sample));
                     framesInSegment++;
                 }
@@ -435,29 +579,39 @@ internal sealed class CaptureEngine : IDisposable
 
     private void Fail(string stage, Exception ex)
     {
-        // An AV1 stream that dies before its first sample lands is not a glitch:
-        // the sink cannot write this encoder's headers, and every rebuilt engine
-        // fails identically (#7). Poison AV1 so the restart comes back on H264.
-        // Mid-stream failures are left alone — those are device losses, not codec
-        // mismatches, and H264 would not have survived them either.
-        if (Codec == Mf.VideoFormat_AV1 && framesInSegment == 0 && !av1Rejected)
+        bool first = !errored;
+        errored = true;
+        if (first)
         {
-            av1Rejected = true;
-            AppLog.Write("AV1 failed before its first sample; H264 for the rest of this session");
-        }
-
-        if (!errored)
-        {
-            errored = true;
             // Full stack into the log: the field failures here are COM cast/RCW
             // exceptions whose message alone cannot say WHICH call site died.
             AppLog.Write($"engine error detail ({stage}): {ex}");
+        }
+
+        // The sink accepts the first few AV1 samples and only then fails (#9, #10), so
+        // "before its first sample" never fired and every rebuild chose AV1 again. The
+        // gate decides instead (header error, or anything before the first good AV1
+        // segment); a rejection is not a user-facing error, just a rebuild on H.264.
+        if (Codec == Mf.VideoFormat_AV1 && RejectAv1($"{stage}: 0x{ex.HResult:X8}", ex.HResult, raise: true))
+        {
+            return;
+        }
+
+        if (first)
+        {
             Error?.Invoke($"{stage}: {ex.Message}");
         }
     }
 
     private Mf.IMFSinkWriter CreateWriter(string path)
     {
+        // The self-test can rule AV1 out between this engine's construction and its
+        // first writer.
+        if (Codec == Mf.VideoFormat_AV1 && Av1.Rejected)
+        {
+            Codec = Mf.VideoFormat_H264;
+        }
+
         try
         {
             return CreateWriterFor(path, Codec);
@@ -468,9 +622,117 @@ internal sealed class CaptureEngine : IDisposable
             // H.264 is the universal fallback — sticky, so every later segment in the
             // buffer matches and the mux never sees mixed codecs.
             AppLog.Write("AV1 encoder rejected the stream; falling back to H264");
-            av1Rejected = true;
+            Av1.Reject();
             Codec = Mf.VideoFormat_H264;
             return CreateWriterFor(path, Codec);
+        }
+    }
+
+    /// <summary>
+    /// The startup AV1 self-test (#9, #10): a handful of frames at the capture settings
+    /// through the real device, sample pool and fragmented-MP4 sink writer into a temp
+    /// file, finalized, decoded back and deleted. False (and AV1 out for the session) on
+    /// any failure, or when there is no answer within <paramref name="timeout"/>; a
+    /// test still running then is abandoned, and cleans up after itself if it ever
+    /// returns. Blocks for at most the timeout; call on an MTA thread.
+    /// </summary>
+    public static bool SelfTestAv1(int width, int height, int fps, int quality, TimeSpan timeout)
+    {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var path = Path.Combine(Path.GetTempPath(), $"dejavu_av1test_{Environment.ProcessId}.mp4");
+        var work = Task.Run(() =>
+        {
+            try
+            {
+                using (var probe = new CaptureEngine(width, height, fps, quality))
+                {
+                    probe.WriteSelfTest(path, SelfTestFrames);
+                }
+
+                return Mf.ProbeVideo(path, maxSamples: SelfTestFrames).Frames > 0
+                    ? null
+                    : "the test file decoded to no frames";
+            }
+            catch (Exception ex)
+            {
+                // COM messages already end in their HRESULT; others get one.
+                var message = ex.Message.Trim();
+                return message.Contains($"{ex.HResult:X8}", StringComparison.OrdinalIgnoreCase)
+                    ? message
+                    : $"{message} (0x{ex.HResult:X8})";
+            }
+            finally
+            {
+                try { File.Delete(path); } catch { }
+            }
+        });
+
+        var failure = work.Wait(timeout) ? work.Result : $"no answer within {timeout.TotalMilliseconds:F0} ms";
+        if (failure is null)
+        {
+            AppLog.Write($"AV1 self-test passed in {clock.ElapsedMilliseconds} ms ({width}x{height}, {fps} fps)");
+            return true;
+        }
+
+        Av1.Reject();
+        AppLog.Write($"AV1 self-test failed: {failure}; H264 for the rest of this session");
+        return false;
+    }
+
+    private void WriteSelfTest(string path, int frames)
+    {
+        var testWriter = CreateWriterFor(path, Mf.VideoFormat_AV1);
+        try
+        {
+            for (int i = 0; i < frames; i++)
+            {
+                // The pool refills as the encoder releases samples; throttling is off,
+                // so this rarely waits at all.
+                Mf.IMFSample sample;
+                for (int wait = 0; allocator.AllocateSample(out sample) < 0; wait++)
+                {
+                    if (wait == 200)
+                    {
+                        throw new TimeoutException("the encoder never released a sample");
+                    }
+
+                    Thread.Sleep(5);
+                }
+
+                try
+                {
+                    // The texture's content does not matter; its format and size do.
+                    Mf.Check(sample.GetBufferByIndex(0, out var buffer));
+                    try
+                    {
+                        Mf.Check(buffer.SetCurrentLength((uint)(width * height * 4)));
+                    }
+                    finally
+                    {
+                        Marshal.ReleaseComObject(buffer);
+                    }
+
+                    Mf.Check(sample.SetSampleTime(i * frameTicks));
+                    Mf.Check(sample.SetSampleDuration(frameTicks));
+#if DEBUG
+                    if (DebugAv1Fail == "selftest" && i >= 3)
+                    {
+                        Marshal.ThrowExceptionForHR(Av1Gate.SinkHeadersNotFound);
+                    }
+#endif
+                    Mf.Check(testWriter.WriteSample(streamIndex, sample));
+                }
+                finally
+                {
+                    Marshal.ReleaseComObject(sample);
+                }
+            }
+
+            testWriter.Finalize_();
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(testWriter);
         }
     }
 

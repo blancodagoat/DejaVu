@@ -339,6 +339,71 @@ Eq("ultrawide clamps to the H264 ceiling", CaptureEngine.FitEncoder(5120, 1440, 
 Eq("normal size passes through", CaptureEngine.FitEncoder(2560, 1440, Mf.VideoFormat_H264), (2560, 1440));
 Eq("AV1 keeps 5K", CaptureEngine.FitEncoder(5120, 1440, Mf.VideoFormat_AV1), (5120, 1440));
 
+// AV1 gate (#9, #10): the sink writer accepts the first few AV1 samples and only then
+// fails with MF_E_SINK_HEADERS_NOT_FOUND, so "failed before its first sample" never
+// fired and every rebuilt engine picked AV1 again, forever.
+{
+    const int headers = unchecked((int)0xC00D4A45);
+    const int deviceRemoved = unchecked((int)0x887A0005);
+
+    var gate = new Av1Gate();
+    Check("AV1 allowed with hardware and no verdict", gate.Allows(hardwareAvailable: true));
+    Check("AV1 never allowed without hardware", !gate.Allows(hardwareAvailable: false));
+
+    Check("headers error a few frames in rejects AV1", gate.OnFailure(headers));
+    Check("rejected AV1 is no longer allowed", !gate.Allows(hardwareAvailable: true));
+    Check("a second failure does not report again", !gate.OnFailure(headers));
+    Check("nor does any later failure", !gate.OnFailure(deviceRemoved));
+
+    var early = new Av1Gate();
+    Check("any failure before the first good AV1 segment rejects AV1", early.OnFailure(deviceRemoved));
+
+    var proven = new Av1Gate();
+    Check("a fresh session has no verified AV1 segment", !proven.Verified);
+    proven.OnSegmentVerified();
+    Check("a read-back AV1 segment marks the session verified", proven.Verified);
+    Check("device loss after a good AV1 segment keeps AV1", !proven.OnFailure(deviceRemoved));
+    Check("AV1 still allowed after a mid-stream device loss", proven.Allows(hardwareAvailable: true));
+    Check("headers error rejects AV1 even after a good segment", proven.OnFailure(headers));
+    Check("headers error after a good segment disallows AV1", !proven.Allows(hardwareAvailable: true));
+
+    var rejectedFirst = new Av1Gate();
+    Check("explicit reject reports once", rejectedFirst.Reject());
+    Check("explicit reject is idempotent", !rejectedFirst.Reject());
+    rejectedFirst.OnSegmentVerified();
+    Check("a verified segment cannot revive rejected AV1", !rejectedFirst.Allows(hardwareAvailable: true));
+
+    var selfTest = new Av1Gate();
+    Check("first start claims the self-test", selfTest.TryClaimSelfTest());
+    Check("the self-test runs once per session", !selfTest.TryClaimSelfTest());
+    var noTestNeeded = new Av1Gate();
+    noTestNeeded.Reject();
+    Check("no self-test once AV1 is rejected", !noTestNeeded.TryClaimSelfTest());
+}
+
+// An undecodable video (the AV1 header failure leaves one behind) must never enter the
+// segment ring: Prune keeps segments by count, so a junk segment per restart pushed
+// the good footage out. Headless: Media Foundation parses without a desktop or GPU.
+{
+    var dir = Path.Combine(Path.GetTempPath(), "DejaVu.JoinTest");
+    Directory.CreateDirectory(dir);
+    string vid = Path.Combine(dir, "vid_x.mp4"), aud = Path.Combine(dir, "aud_x.mp4"), seg = Path.Combine(dir, "seg_x.mp4");
+    var junk = new byte[4096];
+    new Random(7).NextBytes(junk);
+
+    File.WriteAllBytes(vid, junk);
+    File.WriteAllBytes(aud, junk);
+    ReplayBuffer.JoinSegment(vid, aud, seg);
+    Check("junk video with audio does not become a segment", !File.Exists(seg));
+    Check("junk video with audio is removed", !File.Exists(vid) && !File.Exists(aud));
+
+    File.WriteAllBytes(vid, junk);
+    ReplayBuffer.JoinSegment(vid, aud, seg);
+    Check("junk silent video does not become a segment", !File.Exists(seg));
+    Check("junk silent video is removed", !File.Exists(vid));
+    Directory.Delete(dir, recursive: true);
+}
+
 // Username scrubbing: word-bounded, and short/generic names must not shred the log.
 Eq("username scrubbed at word boundaries",
     IssueReport.Scrub("saved by Jax_ok for Jax", @"C:\Users\Jax", "Jax"), "saved by Jax_ok for <user>");
@@ -408,6 +473,33 @@ Eq("oversized single clip survives alone",
 
     var huge = IssueReport.BuildUrl("t", "e", new string('x', 100_000), @"C:\Users\casey", "casey");
     Check("huge log tail stays under GitHub's URL limit", huge.Length < 8_000, $"{huge.Length} chars");
+}
+
+// AV1 self-test at the primary display's size, timed. Needs a GPU with hardware AV1;
+// prints SKIP without one. Usage: -- av1selftest
+if (args.Length > 0 && args[0] == "av1selftest")
+{
+    if (!CaptureEngine.Av1Available)
+    {
+        Console.WriteLine("SKIP av1selftest: no hardware AV1 encoder and decoder on this PC.");
+        return 0;
+    }
+
+    int w, h;
+    using (var sizing = new CaptureEngine(Native.PrimaryMonitor(), IntPtr.Zero, 60, 70))
+    {
+        (w, h) = (sizing.Width, sizing.Height);
+    }
+
+    var clock = System.Diagnostics.Stopwatch.StartNew();
+    bool ok = CaptureEngine.SelfTestAv1(w, h, 60, 70, TimeSpan.FromSeconds(5));
+    Console.WriteLine($"av1selftest: {(ok ? "passed" : "FAILED")} in {clock.ElapsedMilliseconds} ms at {w}x{h}");
+    Check("AV1 self-test passes on hardware that encodes AV1", ok);
+    Check("a passed self-test leaves AV1 allowed", CaptureEngine.Av1.Allows(CaptureEngine.Av1Available));
+    Check("the self-test leaves no temp file behind",
+        !File.Exists(Path.Combine(Path.GetTempPath(), $"dejavu_av1test_{Environment.ProcessId}.mp4")));
+    Console.WriteLine($"{passed} passed, {failed} failed");
+    return failed == 0 ? 0 : 1;
 }
 
 // Inspect: decode-probe arbitrary files. Usage: -- inspect <file> [<file>...]

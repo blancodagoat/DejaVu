@@ -27,6 +27,10 @@ internal sealed class ReplayBuffer : IDisposable
     /// the 10 s shutdown watchdog in <see cref="Program"/> that Exit runs under.</summary>
     private static readonly TimeSpan EngineOpTimeout = TimeSpan.FromSeconds(6);
 
+    /// <summary>How long the first start waits for the AV1 self-test. Well inside
+    /// <see cref="EngineOpTimeout"/>, which bounds the whole start.</summary>
+    private static readonly TimeSpan Av1SelfTestTimeout = TimeSpan.FromSeconds(1);
+
     private CaptureEngine? engine;
     private IntPtr engineMonitor;
     private IntPtr engineWindow;
@@ -314,6 +318,17 @@ internal sealed class ReplayBuffer : IDisposable
                 engineMonitor = monitor;
                 engineWindow = window;
                 engine.Error += OnEngineError;
+                engine.CodecRejected += OnCodecRejected;
+
+                // Once per session, before AV1's first writer and at this engine's size,
+                // fps and quality (#9, #10). Bounded so the first buffering start waits
+                // at most about a second for it; a failure or no answer means H.264,
+                // which engine.Start then picks up.
+                if (engine.Codec == Mf.VideoFormat_AV1 && CaptureEngine.Av1.TryClaimSelfTest())
+                {
+                    CaptureEngine.SelfTestAv1(
+                        engine.Width, engine.Height, config.Fps, config.QualityValue, Av1SelfTestTimeout);
+                }
 
                 BeginSegmentPaths();
                 // Inside the guard on purpose: encoder negotiation happens here, not in
@@ -537,6 +552,17 @@ internal sealed class ReplayBuffer : IDisposable
         }
 
         return (int)pid;
+    }
+
+    /// <summary>The engine's AV1 path can't write MP4 on this PC. Not a failure to count
+    /// or report: rebuild, and the new engine comes back on H.264.</summary>
+    private void OnCodecRejected()
+    {
+        if (Running)
+        {
+            AppLog.Write("rebuilding the capture engine on H264");
+            Task.Run(Restart);
+        }
     }
 
     private void OnEngineError(string message)
@@ -931,9 +957,11 @@ internal sealed class ReplayBuffer : IDisposable
     /// <summary>
     /// Turns a finished video (and its audio chunk, when one exists) into the final
     /// segment file. A failed mux degrades to silent video — a replay without audio
-    /// beats no replay.
+    /// beats no replay. A video that does not decode is dropped rather than kept: the
+    /// ring is pruned by count, so junk segments (one per restart while a broken AV1
+    /// path failed every second, #9 #10) pushed every good segment out of the buffer.
     /// </summary>
-    private static void JoinSegment(string videoPath, string audioPath, string segmentPath)
+    internal static void JoinSegment(string videoPath, string audioPath, string segmentPath)
     {
         try
         {
@@ -961,6 +989,13 @@ internal sealed class ReplayBuffer : IDisposable
             TryDelete(audioPath);
         }
 
+        if (!Decodes(videoPath))
+        {
+            AppLog.Write($"segment video did not decode; dropped ({Path.GetFileName(segmentPath)})");
+            TryDelete(videoPath);
+            return;
+        }
+
         try
         {
             File.Move(videoPath, segmentPath, overwrite: true);
@@ -968,6 +1003,18 @@ internal sealed class ReplayBuffer : IDisposable
         catch
         {
             // The video file itself is gone or locked; the segment is lost.
+        }
+    }
+
+    private static bool Decodes(string videoPath)
+    {
+        try
+        {
+            return Mf.ProbeVideo(videoPath, maxSamples: 1).Frames > 0;
+        }
+        catch
+        {
+            return false;
         }
     }
 
