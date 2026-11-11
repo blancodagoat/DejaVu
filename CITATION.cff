@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use DejaVu in your work, please cite it using these details."
+title: DejaVu
+abstract: >-
+  Instant replay for Windows. Keeps the last 5 to 25 minutes of your screen in a crash-safe
+  buffer on disk and saves it as an MP4 when you press a key.
+type: software
+authors:
+  - name: blancodagoat
+    website: "https://blancodagoat.dev"
+license: MIT
+version: 1.5.2
+date-released: "2026-11-07"
+url: "https://blancodagoat.dev/dejavu/"
+repository-code: "https://gitlab.com/blancodadev/DejaVu"
+keywords:
+  - instant replay
+  - screen recording
+  - Windows
+  - game capture
