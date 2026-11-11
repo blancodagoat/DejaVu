@@ -10,9 +10,9 @@
 
 `one exe` · `any GPU` · `no account` · `no uploads` · `no telemetry`
 
-<a href="https://git.blancodagoat.dev/blancodagoat/DejaVu/releases/download/v1.5.0/dejavu-1.5.mp4"><img src="assets/demo.webp" width="760" alt="DejaVu in 20 seconds: Alt+F10 saves the play that just happened, the new Audio devices menu puts voice chat in the clip, and a crash still leaves the buffer"></a>
+<a href="https://gitlab.com/blancodadev/DejaVu/-/releases/v1.5.0/downloads/dejavu-1.5.mp4"><img src="assets/demo.webp" width="760" alt="DejaVu in 20 seconds: Alt+F10 saves the play that just happened, the new Audio devices menu puts voice chat in the clip, and a crash still leaves the buffer"></a>
 
-<sub>Watch it with sound: <a href="https://git.blancodagoat.dev/blancodagoat/DejaVu/releases/download/v1.5.0/dejavu-1.5.mp4">dejavu-1.5.mp4</a> · music: Sascha Ende, ende.app (CC BY 4.0)</sub>
+<sub>Watch it with sound: <a href="https://gitlab.com/blancodadev/DejaVu/-/releases/v1.5.0/downloads/dejavu-1.5.mp4">dejavu-1.5.mp4</a> · music: Sascha Ende, ende.app (CC BY 4.0)</sub>
 
 </div>
 
@@ -26,7 +26,7 @@
 
 That's the entire app. There is no main window and nothing to set up; every setting lives in the tray menu. You don't have to wait for the buffer to fill either: press the key ninety seconds after launch and you get a ninety-second clip.
 
-**Get it:** `DejaVu.exe` from the [latest release](https://git.blancodagoat.dev/blancodagoat/DejaVu/releases/latest). If your browser saved it as `DejaVu (1).exe` next to an old copy, run it anyway: on launch it deletes the stale copies beside it and renames itself back.
+**Get it:** `DejaVu.exe` from the [latest release](https://gitlab.com/blancodadev/DejaVu/-/releases/permalink/latest). If your browser saved it as `DejaVu (1).exe` next to an old copy, run it anyway: on launch it deletes the stale copies beside it and renames itself back.
 
 ---
 
@@ -183,6 +183,6 @@ The smoke test records the real screen and plays a test tone to prove exclusion 
 
 <div align="center">
 
-**[MIT license](LICENSE)** · sibling of Memento, the screenshot tool that stays out of your way
+**[MIT license](LICENSE)**
 
 </div>
