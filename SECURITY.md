@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Only the [latest release](https://git.blancodagoat.dev/blancodagoat/DejaVu/releases/latest) is supported. There is no auto-updater, so please update manually before reporting.
+Only the [latest release](https://github.com/blancodagoat/DejaVu/releases/latest) is supported. There is no auto-updater, so please update manually before reporting.
 
 ## Reporting a vulnerability
 

@@ -5,8 +5,7 @@ namespace DejaVu;
 
 /// <summary>
 /// User-initiated update check — the app never phones home on its own, and the README
-/// says so. One request to the project's Forgejo releases API (GitHub-compatible fields),
-/// newest stable vX.Y.Z tag wins.
+/// says so. One request to the GitHub releases API, newest stable vX.Y.Z tag wins.
 /// </summary>
 internal static class UpdateCheck
 {
@@ -27,7 +26,7 @@ internal static class UpdateCheck
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
         http.DefaultRequestHeaders.UserAgent.ParseAdd(AppInfo.Name);
-        var json = await http.GetStringAsync($"https://git.blancodagoat.dev/api/v1/repos/{Repo}/releases?limit=10");
+        var json = await http.GetStringAsync($"https://api.github.com/repos/{Repo}/releases?per_page=10");
         return ParseNewest(json, current);
     }
 

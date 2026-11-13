@@ -677,12 +677,12 @@ SignalAnalysisTests.Run((name, ok, detail) => Check(name, ok, detail));
         UpdateCheck.ParseNewest(releases, new Version(1, 2, 0)) is null);
     Check("four-part local version compares as equal",
         UpdateCheck.ParseNewest("""[{"tag_name":"v1.0.0","prerelease":false,"html_url":"x"}]""", new Version(1, 0, 0, 0)) is null);
-    // Forgejo's releases API (the project's home since 1.5.1) uses GitHub's field names.
-    const string forgejo = """[{"id":96,"tag_name":"v1.5.0","name":"v1.5.0","draft":false,"prerelease":false,"html_url":"https://git.blancodagoat.dev/blancodagoat/DejaVu/releases/tag/v1.5.0"}]""";
+    // A release as the GitHub API lists it, with fields the check does not read.
+    const string listed = """[{"id":96,"tag_name":"v1.5.0","name":"v1.5.0","draft":false,"prerelease":false,"html_url":"https://github.com/blancodagoat/DejaVu/releases/tag/v1.5.0"}]""";
     Check("update check skips a draft release",
         UpdateCheck.ParseNewest("""[{"tag_name":"v9.0.0","draft":true,"prerelease":false,"html_url":"x"}]""", new Version(1, 0, 0)) is null);
-    Check("update check reads a Forgejo release",
-        UpdateCheck.ParseNewest(forgejo, new Version(1, 4, 0)) is { } f && f.Version == new Version(1, 5, 0)
+    Check("update check reads a listed release",
+        UpdateCheck.ParseNewest(listed, new Version(1, 4, 0)) is { } f && f.Version == new Version(1, 5, 0)
         && f.Url.StartsWith(AppInfo.ProjectUrl + "/releases/"));
 }
 

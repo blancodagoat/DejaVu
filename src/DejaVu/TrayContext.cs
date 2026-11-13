@@ -283,7 +283,7 @@ internal sealed class TrayContext : ApplicationContext
             {
                 // Proxies, TLS inspection, rate limits and plain blocks all land here;
                 // the actual reason beats a generic "try again later".
-                Balloon("Update check failed", "Couldn't reach git.blancodagoat.dev: " + ex.Message, ToolTipIcon.Warning);
+                Balloon("Update check failed", "Couldn't reach GitHub: " + ex.Message, ToolTipIcon.Warning);
             }
             finally
             {
@@ -294,7 +294,7 @@ internal sealed class TrayContext : ApplicationContext
 
         var notify = Toggle("Notify about new versions", () => config.UpdateNotify,
             v => config.UpdateNotify = v);
-        notify.ToolTipText = "Checks git.blancodagoat.dev a few times a day, which means that server sees your IP. "
+        notify.ToolTipText = "Checks GitHub a few times a day, which means GitHub sees your IP. "
             + "Off (the default), the app never phones home.";
         menu.Items.Add(notify);
 

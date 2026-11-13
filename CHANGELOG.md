@@ -1,7 +1,13 @@
 # Changelog
 
-Every release, newest first. The three 1.5 releases have full notes in [docs/](docs); older
+Every release, newest first. The 1.5 releases have full notes in [docs/](docs); older
 ones are summed up in a line each. Dates are release dates.
+
+## 1.5.3 (2026-11-13)
+
+- DejaVu is back on GitHub. "Check for updates" and "Notify about new versions" ask GitHub again,
+  and the download links point there. Nothing else changed.
+  [Full notes](docs/release-notes-1.5.3.md)
 
 ## 1.5.2 (2026-11-07)
 

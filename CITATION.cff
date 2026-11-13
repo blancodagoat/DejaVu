@@ -9,10 +9,10 @@ authors:
   - name: blancodagoat
     website: "https://blancodagoat.dev"
 license: MIT
-version: 1.5.2
-date-released: "2026-11-07"
+version: 1.5.3
+date-released: "2026-11-13"
 url: "https://blancodagoat.dev/dejavu/"
-repository-code: "https://gitlab.com/blancodadev/DejaVu"
+repository-code: "https://github.com/blancodagoat/DejaVu"
 keywords:
   - instant replay
   - screen recording

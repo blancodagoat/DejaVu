@@ -10,9 +10,9 @@
 
 `one exe` · `any GPU` · `no account` · `no uploads` · `no telemetry`
 
-<a href="https://gitlab.com/blancodadev/DejaVu/-/releases/v1.5.0/downloads/dejavu-1.5.mp4"><img src="assets/demo.webp" width="760" alt="DejaVu in 20 seconds: Alt+F10 saves the play that just happened, the new Audio devices menu puts voice chat in the clip, and a crash still leaves the buffer"></a>
+<a href="https://github.com/blancodagoat/DejaVu/releases/download/v1.5.0/dejavu-1.5.mp4"><img src="assets/demo.webp" width="760" alt="DejaVu in 20 seconds: Alt+F10 saves the play that just happened, the new Audio devices menu puts voice chat in the clip, and a crash still leaves the buffer"></a>
 
-<sub>Watch it with sound: <a href="https://gitlab.com/blancodadev/DejaVu/-/releases/v1.5.0/downloads/dejavu-1.5.mp4">dejavu-1.5.mp4</a> · music: Sascha Ende, ende.app (CC BY 4.0)</sub>
+<sub>Watch it with sound: <a href="https://github.com/blancodagoat/DejaVu/releases/download/v1.5.0/dejavu-1.5.mp4">dejavu-1.5.mp4</a> · music: Sascha Ende, ende.app (CC BY 4.0)</sub>
 
 </div>
 
@@ -26,7 +26,7 @@
 
 That's the entire app. There is no main window and nothing to set up; every setting lives in the tray menu. You don't have to wait for the buffer to fill either: press the key ninety seconds after launch and you get a ninety-second clip.
 
-**Get it:** `DejaVu.exe` from the [latest release](https://gitlab.com/blancodadev/DejaVu/-/releases/permalink/latest). If your browser saved it as `DejaVu (1).exe` next to an old copy, run it anyway: on launch it deletes the stale copies beside it and renames itself back.
+**Get it:** `DejaVu.exe` from the [latest release](https://github.com/blancodagoat/DejaVu/releases/latest). If your browser saved it as `DejaVu (1).exe` next to an old copy, run it anyway: on launch it deletes the stale copies beside it and renames itself back.
 
 ---
 
@@ -62,7 +62,7 @@ That's the entire app. There is no main window and nothing to set up; every sett
 | Clip folder cap | Off / 10 / 25 / 50 GB |
 | Hotkey | Click-to-rebind dialog |
 | Corner indicator | Off, the red dot, or the app icon. It sits on the display being recorded, stays above fullscreen games, and never appears in your clips |
-| Notify about new versions | Off by default, so the app stays silent on the network. On, it asks git.blancodagoat.dev a few times a day; on a scoop install, clicking the update balloon runs the whole update and restarts the app |
+| Notify about new versions | Off by default, so the app stays silent on the network. On, it asks GitHub a few times a day; on a scoop install, clicking the update balloon runs the whole update and restarts the app |
 
 > **Yellow border on Windows 10?** That is the OS telling you something is capturing the
 > screen, and Windows 10 has no setting for it. Switch *Capture method* to Desktop

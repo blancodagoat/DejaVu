@@ -5,7 +5,7 @@ namespace DejaVu;
 /// home" stays literally true until the user flips the tray toggle. When on: one
 /// releases-API request shortly after launch and every six hours after — a new release
 /// reaches running installs within hours instead of whenever someone remembers to
-/// click, and four tiny requests a day are nothing for the project's server.
+/// click, and four tiny requests a day sit far under GitHub's anonymous rate limit.
 /// Each found version notifies once; failures are silent, because a blocked proxy or
 /// an offline evening must not toast every cycle.
 /// </summary>
