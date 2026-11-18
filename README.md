@@ -124,7 +124,7 @@ DejaVu is built for roughly 2015 machines and up:
 <br>
 
 - The buffer lives in `%LOCALAPPDATA%\DejaVu\buffer` and is wiped on a clean exit. After a crash it becomes your recovered clip instead.
-- Nothing leaves your machine. No uploads, no account, no telemetry. The app never phones home; the update check in the tray menu runs only when you click it. The one exception is opt-in: turn on "Notify about new versions" and it asks git.blancodagoat.dev a few times a day, which means that server sees your IP.
+- Nothing leaves your machine. No uploads, no account, no telemetry. The app never phones home; the update check in the tray menu runs only when you click it. The one exception is opt-in: turn on "Notify about new versions" and it asks GitHub a few times a day, which means that server sees your IP.
 - Failure balloons offer "click to report": that click copies a short report (what happened, your Windows version, the log tail, usernames scrubbed) to the clipboard and opens the [DejaVu Discord](https://discord.gg/NHke2BwRA6), where you paste it in #support, or don't. The app itself sends nothing, ever.
 - Pause buffering any time from the tray; the dot turns grey.
 - The mic is off unless you turn it on, and Discord voices are kept out of the mix by default.
